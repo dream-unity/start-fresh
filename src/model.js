@@ -63,6 +63,39 @@ function checkAbort(signal) {
   if (signal?.aborted) throw abortError();
 }
 
+function publicEndpoint(value, fallback) {
+  let base;
+  try { base = new URL(value === undefined || value === '' ? '/' : String(value), globalThis.location?.href || fallback); }
+  catch { throw error('The site’s conversation address is invalid.', 'PUBLIC_CONFIGURATION_REQUIRED'); }
+  const local = ['127.0.0.1', 'localhost', '[::1]'].includes(base.hostname);
+  if ((base.protocol !== 'https:' && !(base.protocol === 'http:' && local)) || base.username || base.password || base.search || base.hash) {
+    throw error('The site’s conversation address must use a secure connection.', 'PUBLIC_CONFIGURATION_REQUIRED');
+  }
+  if (!base.pathname.endsWith('/')) base.pathname += '/';
+  return new URL('api/nexus', base);
+}
+
+/** Fit the application's accepted notes to the public API without mutating them. */
+function publicContext(context) {
+  if (context === undefined) return undefined;
+  if (!context || typeof context !== 'object' || Array.isArray(context)
+      || !RESPONSE_SCHEMA.properties.region.enum.includes(context.region) || !Array.isArray(context.memory)) {
+    throw error('The included conversation context is invalid.', 'PUBLIC_INVALID_CONTEXT');
+  }
+  const result = { region: context.region, memory: [] };
+  const kinds = RESPONSE_SCHEMA.properties.memory.anyOf[1].properties.kind.enum;
+  // Most recently accepted notes have priority when the UTF-8 budget is full.
+  for (const note of context.memory.slice(-12).reverse()) {
+    if (!note || !kinds.includes(note.kind) || typeof note.text !== 'string' || !note.text.trim()) continue;
+    let text = note.text.trim();
+    if (text.length > 300) text = text.slice(0, 299).replace(/[\uD800-\uDBFF]$/, '') + '…';
+    const candidate = { kind: note.kind, text };
+    const memory = [candidate, ...result.memory];
+    if (encoder.encode(JSON.stringify({ region: result.region, memory })).length <= 3500) result.memory = memory;
+  }
+  return result;
+}
+
 function boundedText(value, bytes) {
   const encoded = encoder.encode(String(value ?? ''));
   if (encoded.length <= bytes) return String(value ?? '');
@@ -130,6 +163,8 @@ export class ConversationModel {
     this.moduleLoader = moduleLoader;
     this.workerFactory = workerFactory;
     this.localBaseURL = localBaseURL;
+    this.publicURL = null;
+    this.transcriptionReady = false;
     this.provider = null;
     this.modelId = null;
     this.account = null;
@@ -143,16 +178,18 @@ export class ConversationModel {
     this.failure = null;
   }
 
-  async initialize({ provider = 'browser', model: requestedModel, onProgress = () => {} } = {}) {
-    if (!['browser', 'local', 'chatgpt'].includes(provider)) throw error('Choose ChatGPT, browser AI or local AI.', 'INVALID_PROVIDER');
+  async initialize({ provider = 'browser', model: requestedModel, baseUrl, onProgress = () => {} } = {}) {
+    if (!['browser', 'local', 'chatgpt', 'public'].includes(provider)) throw error('Choose an available conversation connection.', 'INVALID_PROVIDER');
     if (this.state === 'disposed') throw error('This conversation has been closed.', 'DISPOSED');
     // ChatGPT initialization always checks the current account and catalog. An
     // account switch must never reuse a previously selected account's model.
-    if (this.state === 'ready' && this.provider === provider && provider !== 'chatgpt') return this;
+    if (this.state === 'ready' && this.provider === provider && !['chatgpt', 'public'].includes(provider)) return this;
     if (this.loading || this.active) throw error('Stop the current operation before changing the model.', 'MODEL_BUSY');
     this.destroyWorker();
     this.engine = null;
     this.provider = provider;
+    this.publicURL = null;
+    this.transcriptionReady = false;
     this.modelId = null;
     this.account = null;
     this.models = [];
@@ -173,7 +210,25 @@ export class ConversationModel {
       onProgress({ progress: Math.max(0, Math.min(1, Number(report.progress) || 0)), text: String(report.text || ''), timeElapsed: Number(report.timeElapsed) || 0 });
     };
     try {
-      if (provider === 'browser') {
+      if (provider === 'public') {
+        progress({ progress: 0, text: 'Connecting to the guide…' });
+        this.publicURL = publicEndpoint(baseUrl, this.localBaseURL);
+        const url = new URL(this.publicURL);
+        url.searchParams.set('op', 'status');
+        const response = await abortable(this.fetch(url, { signal, credentials: 'omit', cache: 'no-store', headers: { Accept: 'application/json' } }), signal);
+        let status;
+        try { status = await abortable(response.json(), signal); } catch { checkAbort(signal); }
+        if (!response.ok || status?.ready !== true) throw responseError(status, {
+          status: response.ok ? 503 : response.status, code: 'PUBLIC_UNAVAILABLE',
+          message: 'The guide is not available at the moment. You can still explore and keep your own notes.',
+        });
+        checkAbort(signal);
+        if (typeof status.model !== 'string' || !/^openai\/[a-zA-Z0-9][a-zA-Z0-9._-]{0,120}$/.test(status.model)) {
+          throw error('The guide returned an invalid connection status.', 'PUBLIC_INVALID_RESPONSE');
+        }
+        this.modelId = status.model;
+        this.transcriptionReady = status.transcription === true;
+      } else if (provider === 'browser') {
         progress({ progress: 0, text: 'Checking this device for browser AI…' });
         if (!this.navigator?.gpu) throw error('This browser does not expose WebGPU. Use an up-to-date WebGPU browser, or run the local AI option on your computer.', 'WEBGPU_UNAVAILABLE');
         const adapter = await abortable(this.navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }), signal);
@@ -255,6 +310,7 @@ export class ConversationModel {
       if (this.failure) throw this.failure;
       if (signal.aborted) throw abortError();
       if (cause?.code) throw cause;
+      if (provider === 'public') throw responseError(null, { status: 503, code: 'PUBLIC_CONNECTION_FAILED', message: 'Could not reach the guide. Check your connection and try again.' });
       if (provider === 'chatgpt') throw responseError(null, { chatgpt: true, status: 503, code: 'CHATGPT_CONNECTION_FAILED', message: 'Could not reach the ChatGPT connection. Check the project server and network, then try again. Your sign-in has not been changed.' });
       throw error('The model could not load. Check available device memory and the network connection, then retry or use local AI. ' + String(cause?.message || cause).slice(0,240), 'MODEL_LOAD_FAILED');
     } finally {
@@ -263,7 +319,7 @@ export class ConversationModel {
     }
   }
 
-  async reply({ messages, signal, onToken = () => {} }) {
+  async reply({ messages, context, signal, onToken = () => {} }) {
     if (this.state !== 'ready') throw error('Choose and load a conversation model first.', 'MODEL_NOT_READY');
     if (this.active) throw error('The previous answer is still finishing. Please wait a moment.', 'MODEL_BUSY');
     checkAbort(signal);
@@ -318,7 +374,9 @@ export class ConversationModel {
     };
     armTimeout();
     try {
-      if (this.provider === 'browser') {
+      if (this.provider === 'public') {
+        await Promise.race([this.replyPublic(prepared, context, operation.controller.signal, receive), failed]);
+      } else if (this.provider === 'browser') {
         const engine = this.engine;
         const stream = await Promise.race([engine.chat.completions.create({
           messages: prepared, stream: true, temperature: 0.4, max_tokens: 512, repetition_penalty: 1.08,
@@ -348,6 +406,7 @@ export class ConversationModel {
       if (operation.callbackError) throw operation.callbackError;
       if (this.failure) throw this.failure;
       if (operation.controller.signal.aborted) throw abortError();
+      if (this.provider === 'public' && !cause?.code) throw responseError(null, { status: 503, code: 'PUBLIC_CONNECTION_FAILED', message: 'The connection to the guide was interrupted. Please try again when ready.' });
       if (this.provider === 'chatgpt' && !cause?.code) throw responseError(null, { chatgpt: true, status: 503, code: 'CHATGPT_CONNECTION_FAILED', message: 'The ChatGPT connection was interrupted. Your sign-in is preserved; try again when ready.' });
       throw cause instanceof Error ? cause : error(String(cause), 'GENERATION_FAILED');
     } finally {
@@ -355,6 +414,27 @@ export class ConversationModel {
       signal?.removeEventListener('abort', stop);
       if (this.active === operation) this.active = null;
     }
+  }
+
+  async replyPublic(messages, context, signal, receive) {
+    if (!this.publicURL) throw error('Connect to the guide before continuing.', 'PUBLIC_UNAVAILABLE');
+    const url = new URL(this.publicURL);
+    url.searchParams.set('op', 'chat');
+    const includedContext = publicContext(context);
+    const response = await abortable(this.fetch(url, {
+      method: 'POST', signal, credentials: 'omit', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      // The server supplies its own canon and model. No account token, model
+      // selector, or privileged system message crosses this public boundary.
+      body: JSON.stringify({ messages: messages.filter(message => message.role === 'user' || message.role === 'assistant'), ...(includedContext !== undefined && { context: includedContext }) }),
+    }), signal);
+    let body;
+    try { body = await abortable(response.json(), signal); } catch { checkAbort(signal); }
+    checkAbort(signal);
+    if (!response.ok) throw responseError(body, { status: response.status, code: 'PUBLIC_REPLY_FAILED', message: 'The guide could not answer. Please try again in a moment.' });
+    const raw = JSON.stringify(body);
+    decodeResponse(raw);
+    receive(raw);
   }
 
   async replyLocal(messages, signal, receive) {
@@ -436,6 +516,7 @@ export class ConversationModel {
     this.interrupt();
     this.active?.fail(abortError());
     this.state = 'disposed';
+    this.transcriptionReady = false;
     this.destroyWorker();
     this.engine = null;
   }

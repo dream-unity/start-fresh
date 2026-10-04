@@ -26,6 +26,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - name: Install application dependencies
+        run: npm ci --ignore-scripts
       - name: Unit tests and static build
         run: npm run check
       - name: Install pinned browser verification tools

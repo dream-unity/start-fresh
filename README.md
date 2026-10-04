@@ -1,92 +1,75 @@
 # Dream Unity · Start Fresh
 
-A new implementation of the [original Crystal Nexus brief](https://chatgpt.com/share/6ac05873-6728-83ec-a932-66616dcb794a). This repository is independent of the existing Dream Unity websites.
+An independent implementation of the [original Crystal Nexus brief](https://chatgpt.com/share/6ac05873-6728-83ec-a932-66616dcb794a): one continuous crystalline space connecting **Dream Machine** (possibility), **Dream Maker** (agency), **Dream World** (encounter and consequences), and **Unity**.
 
-One continuous crystalline space connects **Dream Machine** (possibility), **Dream Maker** (agency) and **Dream World** (encounter and consequences), through **Unity**. A real conversational model answers your words and proposes movement through the space using constrained structured output. The transcript stays at the edge. Personal threads enter your constellation only when you keep them.
+The intended public experience is simple: **open the website and speak or type to its AI guide**. Visitors do not create an account, sign into ChatGPT, subscribe, install an application, download a language model, or provide credentials. The site owner supplies the hosted AI connection. Personal threads enter a constellation only when the visitor chooses to keep them.
 
-## Run with your ChatGPT subscription
+## Release status — 4 October 2026
 
-The primary conversation option is **Continue with ChatGPT**. Eligible ChatGPT Plus and Pro accounts can authorize this locally running personal app to use their plan allowance. You do not need to create an API key, buy API credits, or download a language model. Your account, workspace and app usage limits still apply. This uses OpenAI's [official Sign in with ChatGPT flow](https://developers.openai.com/siwc/token-sharing-open-source), documented for local apps in the [September 28 integration guide](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt).
+The public frontend and owner-funded server implementation are in this repository. **A working public AI release has not yet been verified.** The [GitHub Pages copy](https://dream-unity.github.io/start-fresh/) serves the interface; GitHub Pages itself does not run the conversation or transcription backend.
 
-Install Node.js 22 or newer, then run:
+The new site and Node backend have been deployed directly and claimed into the owner’s Vercel `start-fresh` project. The public address is https://dream-unity-start-fresh.vercel.app. The hosted API currently returns configuration-required, so live AI is not being claimed as working. Remaining owner setup is concrete:
+
+- Vercel's connected deployment tool rejected access to `dream-unity/start-fresh` with `repo_no_access`; its GitHub integration needs access to this repository. The CLI was not signed in.
+- The AI Gateway dashboard showed **$0 available**. Its advertised $5 credit required a new card verification and was not activated. No usable free balance or model eligibility has been established.
+- No public backend deployment, completed live GPT response, or real microphone transcription has yet been verified for this revision.
+
+The existing ChatGPT Pro subscription has **not** been established as a way to fund anonymous visitors. This implementation uses the owner's Vercel AI Gateway allowance or billing, separate from ChatGPT subscription usage. It makes no claim of unlimited free inference. See [the connection decision](docs/chatgpt-subscription.md) and [verification record](docs/verification.md).
+
+## How the public conversation works
+
+1. The visitor chooses **Speak to enter** and grants microphone permission, or writes in the text field.
+2. The browser records a short turn. Silence can finish it automatically; **Send recording** ends it manually. Recording is capped at 45 seconds.
+3. The site's backend sends the recording for transcription and the resulting text for a contextual GPT reply.
+4. The reply is spoken with a browser voice. Validated meaning data moves the camera through the same Nexus and may propose a constellation thread.
+5. Keeping a proposed thread requires the visitor's explicit choice. Pause, cancellation or leaving the page stops the active microphone turn and invalidates late results.
+
+The server selects `openai/gpt-4.1-mini` for conversation and `openai/whisper-1` for transcription through AI Gateway. These are implementation defaults, not claims of verified account access. This is browser recording and speech synthesis around GPT text reasoning; it is not an embedded ChatGPT Voice session. Writing remains available when microphone capture is unsupported.
+
+Try: “I do not know what I want to do with my life.” Then: “Actually, I know what I want. Starting is the problem.” The guide should revise its interpretation as the conversation changes. Its suggestions are not psychological measurements.
+
+## Owner deployment
+
+These steps are for the site owner. Visitors never perform them.
+
+1. In Vercel, import **`dream-unity/start-fresh`** as a new project. If it is missing or returns `repo_no_access`, grant the Vercel GitHub integration access to this repository, then retry. Keep existing Dream Unity projects and domains unchanged.
+2. Use **Node.js 24**, the repository root, install command **`npm ci`**, build command **`npm run build`**, and output directory **`dist`**. The `api/nexus.mjs` Node function must be deployed alongside the static assets; uploading `dist` alone is insufficient.
+3. Enable the project's **OIDC deployment identity** and AI Gateway access. The backend obtains a fresh owner deployment token with `@vercel/oidc`; no visitor credential or public API key is required. Do not copy personal ChatGPT credentials into Vercel or the repository.
+4. Check the Gateway account's actual balance and access to both configured models. Complete any owner verification that the dashboard requires. Any advertised trial credit is conditional; do not treat the displayed offer as an activated allowance or a guarantee that all models qualify.
+5. Configure the Gateway **project budget and spending controls** before inviting visitors. The code's rate limits are per server instance; they are not a durable global quota or a substitute for owner spending controls. Provider usage, hosting costs and credit eligibility remain account-dependent.
+6. Deploy to the new project's HTTPS URL. Confirm `/api/nexus?op=status` returns a configured connection. This check does not generate a billable answer and does not verify available credits; then complete a real anonymous typed conversation and a real recorded voice turn.
+7. Verify a correction changes the guide's interpretation, a kept note appears in the constellation, and Pause stops the microphone without later automatic reopening. Test from a signed-out/private browser and a real mobile device.
+8. If retaining GitHub Pages as the visitor URL, set `PUBLIC_API_BASE` in `src/runtime-config.js` to the **verified backend origin**, rebuild and publish the Pages assets. Do not put tokens in this value. The backend permits `https://dream-unity.github.io`; list any additional approved frontend origins in `NEXUS_ALLOWED_ORIGINS` as comma-separated exact origins. The empty default uses the current site's own `/api/nexus` function.
+
+The deployment defaults are intentionally owner-controlled. `NEXUS_PUBLIC_MODEL` may select another supported OpenAI model in Gateway, but changing it requires new structured-output, semantic and cost checks. No public visitor can choose an arbitrary upstream, model or billing credential.
+
+## Development
+
+Install Node.js 24 and run:
 
 ```sh
 git clone https://github.com/dream-unity/start-fresh.git
 cd start-fresh
-npm start
-```
-
-The launcher opens your browser. You can also [download the repository ZIP](https://github.com/dream-unity/start-fresh/archive/refs/heads/main.zip), extract it, and run `Start-Dream-Unity.cmd` on Windows or `Start-Dream-Unity.command` on macOS after installing Node.js. If your computer blocks the launcher, use the terminal command above. No `npm install` is needed. Keep the terminal window open while using the app.
-
-1. Open **http://127.0.0.1:4173** and choose **Speak to enter**.
-2. Choose **Continue with ChatGPT**. In the OpenAI window, select your account and approve ChatGPT plan usage for Dream Unity.
-3. Return to the app, choose a model offered for that account, and confirm the connection.
-4. Choose **Speak to enter** to begin, or write in the quiet text field.
-
-The model picker comes from your signed-in account's current catalog; this app does not assume that every subscription includes a particular model. **Manage usage** opens your ChatGPT usage controls. You can disconnect the account in the app and manage app access in ChatGPT settings. See OpenAI's [model and inference contract](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
-
-Sign-in does not import your ChatGPT conversations. Dream Unity supplies its own framework, the current conversation, and the constellation notes you explicitly keep as context. Recognition and spoken replies use browser speech services; this is not ChatGPT's native voice mode. The current subscription integration supports text inference, not audio input or transcription endpoints ([preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)).
-
-## Preview and hosting
-
-The [public visual preview](https://dream-unity.github.io/start-fresh/) shows the independent Nexus. To use your ChatGPT subscription, run the repository on your computer as above: the local server handles sign-in and keeps OAuth credentials outside the page. The static GitHub Pages preview cannot perform that server role.
-
-Offering ChatGPT plan usage through a remotely hosted public app requires separate OpenAI access approval. Publishing the preview does not grant that approval or complete a hosted subscription deployment. OpenAI describes the distinction in its [open-source integration guide](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt).
-
-## Advanced alternatives
-
-Browser and Ollama models remain optional alternatives. They do not use your ChatGPT subscription.
-
-| Runtime | What it needs | Where conversation text goes |
-| --- | --- | --- |
-| Browser model | A WebGPU-compatible browser/device, about 1 GB initial model download and roughly 2 GB available graphics memory | Inference runs on your device in a worker. Model files come from public distribution hosts. |
-| Local Ollama | [Ollama](https://ollama.com), running on the same computer as this server | To the loopback Ollama process. This app does not send it to a cloud AI provider. |
-
-For the local option, install the model before connecting:
-
-```sh
-ollama pull qwen2.5:1.5b
-npm start
-```
-
-If Ollama is not already serving, run `ollama serve` in another terminal. Choose **Connect local model** under the alternative runtimes. To use another installed instruction model, set `OLLAMA_MODEL` when starting the server. These small-model fallbacks can misunderstand intentions: the latest real 1.5B-model smoke test did not consistently choose the requested region. They are not verified substitutes for the primary GPT experience. None of these options requires a Vercel account or external database.
-
-## Enter the experience
-
-After the model is ready, **Speak to enter** starts the opening invitation, “Tell me why you are here.” The guide listens for a turn, answers, speaks, and then offers the next listening turn. A silence, permission error, service failure, explicit pause or backgrounded page pauses the conversation; it cannot start an endless retry loop. A quiet text field uses the same model and scene.
-
-Try:
-
-- “I do not know what I want to do with my life.”
-- “Actually, I know what I want. Starting is the problem.”
-- “I tried it, but the people I depend on objected.”
-- “How do possibility, action and consequence fit together?”
-
-The guide can propose a region and a memory. Region names are validated against a fixed allowlist; the model cannot execute code, open arbitrary destinations, or save your notes. Invalid navigation leaves the scene unchanged. You can explicitly write or say **“go to Dream Machine”**, **“return to Unity”**, **“show my constellation”**, or **“pause”**.
-
-## Your constellation
-
-The default is **session only**. Notes stay in application memory, including when browser storage is unavailable. You can edit, connect, archive, recover, delete, import and export threads. Remembering on this device requires an explicit setting. A future visit offers **Restore my saved constellation**; saved notes are not silently loaded into a new conversation. Turning device saving off removes this app’s saved copy and keeps the current notes in the session. Browser storage is not encrypted; use session mode on a shared device.
-
-Conversation transcripts are held only in the current page and can be exported. Confirmed, active constellation notes can be supplied to the selected model as context. The application stores no audio recordings. Browser speech recognition may use the browser vendor’s network service; local language-model inference does **not** make browser speech recognition offline. Browser support and permission policies vary. Text remains available when recognition is absent.
-
-## Build and verify
-
-```sh
+npm ci
 npm test
 npm run build
+npm start
 ```
 
-`dist/` contains the independent static application. It can be served from an HTTPS host under a repository subpath. Browser inference is available on compatible devices; ChatGPT sign-in and the Ollama option require the included local server. Opening `index.html` directly with `file://` is not supported.
+The local launcher is a development convenience, not a visitor requirement. Serving the interface locally does not create production Gateway access. Use a configured deployment identity and an approved backend when testing real public inference. Opening `index.html` with `file://` is unsupported.
 
-The GitHub Actions workflow runs unit/security tests, a Chromium end-to-end suite with **simulated speech and model responses**. A separate **real Ollama inference** smoke test is available through the manual workflow’s `verify_ollama` option, because Ollama is now an experimental alternative. A passing mocked browser test proves application behavior, not model quality or a successful account authorization. The Ollama semantic limitation above remains a real failure, not a passing inference result. A live ChatGPT authorization and completed response must be verified with an eligible user's consent. Browser-model GPU execution and a physical microphone also need checks on a compatible device.
+`dist/` contains static assets. `api/nexus.mjs` and its server modules provide the public conversation and transcription function. The app has no service worker or repeating availability check that should flip microphone readiness on and off.
 
-Results and screenshots are retained as workflow artifacts; the `verification-evidence` branch carries readable evidence tied to the source commit. See the [verification record](docs/verification.md), [acceptance criteria](docs/acceptance.md), [architecture](docs/architecture.md) and [runtime details](docs/model-runtime.md).
+## Constellation and privacy
 
-The original conversation mentioned historical games and Become without defining their implementation. This build does not claim to ship those unknown experiences. There is no Earth-view application, map embed, or connection to an existing Dream Unity deployment.
+Constellation memory defaults to **session only**. Notes remain in the page's memory until the visitor explicitly enables remembering on that device. Saved notes require a deliberate restore on a later visit. Visitors can edit, connect, archive, recover, delete, import and export their notes. Turning device saving off removes the application's saved copy and retains the active session. Browser storage is not encrypted.
 
-## Technical boundaries
+The conversation and approved notes are sent to the site's AI service as context. Recordings are forwarded for transcription; this application does not persist audio recordings or server-side transcripts. Provider processing and retention policies remain separate. Browser speech synthesis also depends on the device and selected voice. Exporting a transcript or constellation is an explicit visitor action.
 
-The server listens on `127.0.0.1`. It handles the approved OpenAI sign-in/inference endpoints or loopback Ollama, rejects cross-origin chat requests, bounds request size, and serves public app assets separately from credentials. Keep it local; it is not a public multi-user backend. This repository has no service worker or availability polling that can leave an old deployment controlling the interface.
+## Verification and scope
 
-Three.js 0.185.1 is vendored with its MIT licence. WebLLM is pinned to 0.2.85. Model weights retain their respective upstream licences. The small local models can misunderstand an intention; their movement is an interpretation you can correct, never a diagnosis or measured state of mind.
+Automated tests distinguish simulated provider/speech fixtures from real inference. Passing browser tests can establish interaction and cancellation behavior, but cannot prove a working production allowance, audible playback, or physical microphone quality. See [verification](docs/verification.md), [architecture](docs/architecture.md), and [runtime details](docs/model-runtime.md).
+
+Legacy local ChatGPT OAuth, WebLLM and Ollama modules remain for developer compatibility and historical tests. They are not visitor setup options or the primary public architecture. The previous 1.5B Ollama semantic test failed; it is not presented as a verified substitute for GPT.
+
+Work is confined to `dream-unity/start-fresh`. **God's Earth View is excluded.** No existing Dream Unity deployment or domain is part of this release. The historical nine games and Become destinations were not specified sufficiently to implement and are not claimed as shipped. Three.js is vendored with its MIT licence; retained model runtimes and weights have their respective upstream licences.

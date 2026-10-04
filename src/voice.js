@@ -2,8 +2,9 @@
  * One recognition turn → one spoken reply. Only the application can request the
  * next turn; browser end/error events never reopen the microphone themselves.
  *
- * Browser speech recognition may send audio to the browser vendor's service.
- * This adapter does not promise offline recognition and stores no recordings.
+ * Browser recognition may send audio to the browser vendor. When configured,
+ * the recorder sends one audio turn to the application's transcription service.
+ * Neither path promises offline recognition or persists recordings here.
  */
 const noop = () => {};
 const clean = (text) => String(text ?? '').replace(/\s+/g, ' ').trim();
@@ -19,6 +20,10 @@ const RECOGNITION_ERRORS = {
   'start-timeout': 'The microphone did not start. Check browser permissions and choose Resume.',
   'end-timeout': 'The speech service did not finish this turn. Choose Resume, or continue by writing.',
   'turn-timeout': 'Listening paused after a long turn. Choose Resume when you are ready.',
+  'recording-failed': 'Audio recording stopped unexpectedly. Choose Resume, or continue by writing.',
+  'recording-too-large': 'This recording reached the size limit. Choose Resume and try a shorter turn.',
+  'transcription-failed': 'Your recording could not be transcribed. Choose Resume to try again, or continue by writing.',
+  'transcription-timeout': 'Transcription took too long. Choose Resume to try again, or continue by writing.',
 };
 
 function speechChunks(text) {
@@ -44,7 +49,7 @@ export class VoiceSession {
     onError = noop, onUnsupported = noop,
     environment = globalThis, language,
     startTimeout = 12000, turnTimeout = 90000, endTimeout = 3000,
-    speechTimeout = 120000,
+    speechTimeout = 120000, captureTimeout = 45000, transcriptionTimeout = 45000,
   } = {}) {
     this._env = environment;
     this._Recognition = environment.SpeechRecognition || environment.webkitSpeechRecognition;
@@ -55,12 +60,16 @@ export class VoiceSession {
     this._clearTimeout = environment.clearTimeout?.bind(environment) || globalThis.clearTimeout;
     this._callbacks = { onState, onTranscript, onInterim, onError, onUnsupported };
     this._language = language || environment.navigator?.language || 'en-US';
-    this._timeouts = { startTimeout, turnTimeout, endTimeout, speechTimeout };
+    this._timeouts = { startTimeout, turnTimeout, endTimeout, speechTimeout, captureTimeout: Math.min(45000, captureTimeout), transcriptionTimeout };
+    this._now = environment.performance?.now?.bind(environment.performance) || Date.now;
     this._state = 'idle';
     this._generation = 0;
     this._paused = false;
     this._disposed = false;
     this._recognition = null;
+    this._capture = null;
+    this._transcribe = null;
+    this._captureAuthorized = false;
     this._speech = null;
     this._visibilityListener = () => {
       if (this._document?.visibilityState === 'hidden' && this.active) this.pause('hidden');
@@ -68,17 +77,33 @@ export class VoiceSession {
     this._document?.addEventListener('visibilitychange', this._visibilityListener);
   }
 
-  get recognitionSupported() { return typeof this._Recognition === 'function' && this._env.isSecureContext !== false; }
+  get recorderSupported() { return this._env.isSecureContext !== false && typeof this._env.MediaRecorder === 'function' && typeof this._env.navigator?.mediaDevices?.getUserMedia === 'function'; }
+  get recognitionSupported() { return this._transcribe ? this.recorderSupported : typeof this._Recognition === 'function' && this._env.isSecureContext !== false; }
+  get captureMode() { return this._transcribe ? 'recorder' : 'recognition'; }
+  get capturing() { return this._capture?.phase === 'recording'; }
   get synthesisSupported() { return Boolean(this._synthesis && typeof this._Utterance === 'function'); }
   get supported() { return this.recognitionSupported; }
   get state() { return this._state; }
   get active() { return ['requesting', 'listening', 'thinking', 'speaking'].includes(this._state); }
   get paused() { return this._paused; }
 
-  /** Call directly from a user gesture. Recognition requests its own permission. */
+  /** Configure only after the application confirms its transcription endpoint. */
+  configureTranscription({ transcribe } = {}) {
+    if (this._disposed) return false;
+    if (transcribe != null && typeof transcribe !== 'function') throw new TypeError('transcribe must be a function');
+    const next = transcribe || null;
+    if (next === this._transcribe) return this.recognitionSupported;
+    if (this.active) this.pause('transcription-changed');
+    this._transcribe = next;
+    this._captureAuthorized = false;
+    return this.recognitionSupported;
+  }
+
+  /** Call directly from a user gesture. Capture requests its own permission. */
   async activate() {
     if (this._disposed) return false;
     this._paused = false;
+    this._captureAuthorized = true;
     return this.startListening();
   }
 
@@ -96,10 +121,13 @@ export class VoiceSession {
         code: 'recognition-unsupported',
         message: this._env.isSecureContext === false
           ? 'Microphone access needs HTTPS or localhost. You can continue by writing.'
-          : 'This browser does not support speech recognition. You can continue by writing.',
+          : this._transcribe
+            ? 'This browser cannot record microphone audio. Try a browser with microphone recording support, or continue by writing.'
+            : 'This browser does not support speech recognition. You can continue by writing.',
       });
       return false;
     }
+    if (this._transcribe) return this._startCapture();
     if (this._recognition) return true; // Double taps cannot create two captures.
     const generation = ++this._generation;
     this._cancelSpeech();
@@ -179,6 +207,7 @@ export class VoiceSession {
     if (this._disposed || this._paused) return false;
     ++this._generation;
     this._releaseRecognition(true);
+    this._releaseCapture();
     this._cancelSpeech();
     this._setState('thinking', { reason: 'reply-requested' });
     return true;
@@ -208,6 +237,7 @@ export class VoiceSession {
     if (!spoken) return { status: 'spoken' };
     const generation = ++this._generation;
     this._releaseRecognition(true);
+    this._releaseCapture();
     this._cancelSpeech();
     if (!this.synthesisSupported) {
       this._setState('idle', { reason: 'synthesis-unsupported' });
@@ -297,6 +327,7 @@ export class VoiceSession {
     this._paused = true;
     ++this._generation;
     this._releaseRecognition(true);
+    this._releaseCapture();
     this._cancelSpeech();
     this._setState('paused', { reason });
   }
@@ -305,6 +336,7 @@ export class VoiceSession {
   resume() {
     if (this._disposed) return false;
     this._paused = false;
+    this._captureAuthorized = true;
     return this.startListening();
   }
 
@@ -321,6 +353,229 @@ export class VoiceSession {
     this._disposed = true;
     this._document?.removeEventListener('visibilitychange', this._visibilityListener);
     this._callbacks = { onState: noop, onTranscript: noop, onInterim: noop, onError: noop, onUnsupported: noop };
+  }
+
+  /** Explicit Finish/send, also used by the bounded silence/duration detector. */
+  finishCapture() {
+    const turn = this._capture;
+    if (!this._captureCurrent(turn) || turn.phase !== 'recording') return false;
+    turn.phase = 'stopping';
+    this._clearTimeout(turn.timer);
+    turn.timer = this._setTimeout(() => {
+      if (this._captureCurrent(turn)) this._recognitionFailure('end-timeout');
+    }, this._timeouts.endTimeout);
+    this._setState('thinking', { reason: 'transcribing' });
+    if (!this._captureCurrent(turn)) return false;
+    try { turn.recorder.stop(); this._stopCaptureInput(turn); }
+    catch { this._recognitionFailure('recording-failed'); return false; }
+    return true;
+  }
+
+  _captureCurrent(turn) {
+    return Boolean(turn && !this._disposed && !this._paused && this._capture === turn && this._generation === turn.generation);
+  }
+
+  _startCapture() {
+    if (this._capture) return true;
+    // The application's first asynchronous reply cannot open a microphone. An
+    // explicit activate/resume authorizes subsequent turns in that session.
+    if (!this._captureAuthorized) {
+      this._paused = true;
+      this._setState('paused', { reason: 'microphone-needs-gesture' });
+      this._callbacks.onError({ code: 'microphone-needs-gesture', message: 'Choose Resume to allow the microphone and start speaking.', recoverable: true });
+      return false;
+    }
+    const generation = ++this._generation;
+    this._releaseRecognition(true);
+    this._cancelSpeech();
+    const turn = {
+      generation, phase: 'requesting', controller: new AbortController(),
+      transcribe: this._transcribe, stream: null, recorder: null, chunks: [],
+      bytes: 0, timer: null, sampleTimer: null, audioContext: null,
+      source: null, analyser: null, trackListeners: [],
+    };
+    this._capture = turn;
+    this._setState('requesting', { reason: 'microphone-requested', captureMode: 'recorder' });
+    if (!this._captureCurrent(turn)) return false;
+    turn.timer = this._setTimeout(() => {
+      if (this._captureCurrent(turn)) this._recognitionFailure('start-timeout');
+    }, this._timeouts.startTimeout);
+    // Create/resume the optional meter while still within the user's gesture.
+    const AudioContext = this._env.AudioContext || this._env.webkitAudioContext;
+    if (AudioContext) {
+      try {
+        turn.audioContext = new AudioContext();
+        Promise.resolve(turn.audioContext.resume?.()).catch(noop);
+      } catch { /* Explicit Finish and the 45-second limit remain available. */ }
+    }
+    let pending;
+    try {
+      pending = this._env.navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    } catch (error) {
+      this._recognitionFailure(error?.name === 'NotAllowedError' ? 'not-allowed' : 'audio-capture');
+      return false;
+    }
+    Promise.resolve(pending).then((stream) => {
+      if (!this._captureCurrent(turn)) {
+        for (const track of stream.getTracks()) { try { track.stop(); } catch { /* Already ended. */ } }
+        return;
+      }
+      turn.stream = stream;
+      try {
+        const Recorder = this._env.MediaRecorder;
+        const mimeType = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg;codecs=opus']
+          .find((type) => Recorder.isTypeSupported?.(type));
+        turn.recorder = new Recorder(stream, { ...(mimeType ? { mimeType } : {}), audioBitsPerSecond: 64000 });
+        const recorder = turn.recorder;
+        recorder.ondataavailable = (event) => {
+          if (!this._captureCurrent(turn) || !['recording', 'stopping'].includes(turn.phase) || !event.data?.size) return;
+          turn.bytes += event.data.size;
+          if (turn.bytes > 2 * 1024 * 1024) { this._recognitionFailure('recording-too-large'); return; }
+          turn.chunks.push(event.data);
+        };
+        recorder.onerror = () => { if (this._captureCurrent(turn)) this._recognitionFailure('recording-failed'); };
+        recorder.onstop = () => {
+          if (!this._captureCurrent(turn)) return;
+          if (turn.phase === 'transcribing') return;
+          if (turn.phase !== 'stopping') { this._recognitionFailure('recording-failed'); return; }
+          void this._transcribeCapture(turn);
+        };
+        recorder.onstart = () => {
+          if (!this._captureCurrent(turn) || turn.phase !== 'requesting') return;
+          this._clearTimeout(turn.timer);
+          turn.phase = 'recording';
+          this._setState('listening', { reason: 'recording-started', captureMode: 'recorder', canFinish: true });
+          if (!this._captureCurrent(turn)) return;
+          turn.timer = this._setTimeout(() => { if (this._captureCurrent(turn)) this.finishCapture(); }, this._timeouts.captureTimeout);
+          this._monitorSilence(turn);
+        };
+        for (const track of stream.getAudioTracks()) {
+          const ended = () => {
+            if (this._captureCurrent(turn) && ['requesting', 'recording'].includes(turn.phase)) this._recognitionFailure('audio-capture');
+          };
+          track.addEventListener?.('ended', ended);
+          turn.trackListeners.push([track, ended]);
+        }
+        if (!stream.getAudioTracks().some((track) => track.readyState !== 'ended')) throw new Error('No active microphone');
+        recorder.start(250);
+      } catch {
+        if (this._captureCurrent(turn)) this._recognitionFailure('audio-capture');
+      }
+    }, (error) => {
+      if (this._captureCurrent(turn)) this._recognitionFailure(error?.name === 'NotAllowedError' ? 'not-allowed' : 'audio-capture');
+    });
+    return true;
+  }
+
+  _monitorSilence(turn) {
+    const context = turn.audioContext;
+    if (!context || !this._captureCurrent(turn)) return;
+    try {
+      turn.source = context.createMediaStreamSource(turn.stream);
+      turn.analyser = context.createAnalyser();
+      turn.analyser.fftSize = 1024;
+      turn.source.connect(turn.analyser); // Never connect the microphone to speakers.
+      const samples = new Float32Array(turn.analyser.fftSize);
+      let observed = 0;
+      let lastObserved = this._now();
+      let lastSpeech = 0;
+      let voicedFrames = 0;
+      let heardSpeech = false;
+      const sample = () => {
+        if (!this._captureCurrent(turn) || turn.phase !== 'recording') return;
+        const now = this._now();
+        const elapsed = Math.min(250, Math.max(0, now - lastObserved));
+        lastObserved = now;
+        // A suspended/blocked audio meter must not mistake absent data for silence.
+        if (context.state === 'running') {
+          observed += elapsed;
+          turn.analyser.getFloatTimeDomainData(samples);
+          const rms = Math.sqrt(samples.reduce((sum, value) => sum + value * value, 0) / samples.length);
+          if (rms >= 0.015) {
+            voicedFrames += 1;
+            if (voicedFrames >= 3) heardSpeech = true;
+            lastSpeech = observed;
+          } else {
+            voicedFrames = 0;
+          }
+          if (heardSpeech && observed - lastSpeech >= 2000) { this.finishCapture(); return; }
+          if (!heardSpeech && observed >= 10000) { this._recognitionFailure('no-speech'); return; }
+        }
+        turn.sampleTimer = this._setTimeout(sample, 100);
+      };
+      turn.sampleTimer = this._setTimeout(sample, 100);
+    } catch { /* Recording still has an explicit Finish button and hard limit. */ }
+  }
+
+  async _transcribeCapture(turn) {
+    if (!this._captureCurrent(turn)) return;
+    this._clearTimeout(turn.timer);
+    this._stopCaptureInput(turn);
+    turn.phase = 'transcribing';
+    const BlobClass = this._env.Blob || globalThis.Blob;
+    let blob;
+    try { blob = new BlobClass(turn.chunks, { type: turn.recorder.mimeType || turn.chunks[0]?.type || 'application/octet-stream' }); }
+    catch { this._recognitionFailure('recording-failed'); return; }
+    turn.chunks = [];
+    this._detachRecorder(turn);
+    if (!blob.size) { this._recognitionFailure('no-speech'); return; }
+    turn.timer = this._setTimeout(() => {
+      if (this._captureCurrent(turn)) this._recognitionFailure('transcription-timeout');
+    }, this._timeouts.transcriptionTimeout);
+    try {
+      const result = await turn.transcribe(blob, { signal: turn.controller.signal });
+      if (!this._captureCurrent(turn)) return;
+      if (typeof result !== 'string') throw new TypeError('Transcription must return text');
+      const transcript = clean(result);
+      if (!transcript) { this._recognitionFailure('no-speech'); return; }
+      this._releaseCapture();
+      this._callbacks.onInterim('');
+      if (this._disposed || this._paused || this._generation !== turn.generation) return;
+      this._setState('thinking', { reason: 'turn-complete' });
+      if (!this._disposed && !this._paused && this._generation === turn.generation) this._callbacks.onTranscript(transcript);
+    } catch {
+      if (this._captureCurrent(turn)) this._recognitionFailure('transcription-failed');
+    }
+  }
+
+  _stopCaptureInput(turn) {
+    this._clearTimeout(turn.sampleTimer);
+    turn.sampleTimer = null;
+    for (const [track, listener] of turn.trackListeners) track.removeEventListener?.('ended', listener);
+    turn.trackListeners = [];
+    for (const track of turn.stream?.getTracks() || []) { try { track.stop(); } catch { /* Already ended. */ } }
+    turn.stream = null;
+    try { turn.source?.disconnect(); } catch { /* Already disconnected. */ }
+    try { turn.analyser?.disconnect(); } catch { /* Already disconnected. */ }
+    turn.source = null;
+    turn.analyser = null;
+    const context = turn.audioContext;
+    turn.audioContext = null;
+    try { Promise.resolve(context?.close()).catch(noop); } catch { /* Already closed. */ }
+  }
+
+  _detachRecorder(turn) {
+    const recorder = turn.recorder;
+    if (!recorder) return;
+    recorder.onstart = null;
+    recorder.ondataavailable = null;
+    recorder.onerror = null;
+    recorder.onstop = null;
+    if (recorder.state !== 'inactive') { try { recorder.stop(); } catch { /* Already stopped. */ } }
+    turn.recorder = null;
+  }
+
+  _releaseCapture() {
+    const turn = this._capture;
+    this._capture = null;
+    if (!turn) return;
+    this._clearTimeout(turn.timer);
+    turn.controller.abort();
+    this._detachRecorder(turn);
+    this._stopCaptureInput(turn);
+    turn.chunks = [];
   }
 
   _setState(state, details = {}) {
@@ -357,6 +612,7 @@ export class VoiceSession {
     this._paused = true;
     ++this._generation;
     this._releaseRecognition(true);
+    this._releaseCapture();
     this._setState(code === 'no-speech' || code === 'aborted' ? 'paused' : 'error', { reason: code });
     this._callbacks.onError({ code, message: RECOGNITION_ERRORS[code] || 'Speech recognition stopped. Choose Resume, or continue by writing.', recoverable: true });
   }

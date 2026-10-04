@@ -1,55 +1,63 @@
-# Dream Unity — implementation architecture
+# Dream Unity — public architecture
 
-This independent application implements the conversational Crystal Nexus described in the [original design conversation](https://chatgpt.com/share/6ac05873-6728-83ec-a932-66616dcb794a?ogimg=plain). The current destination is `dream-unity/start-fresh`. It does not import or update the existing production application. Dream World is a conceptual region; God's Earth View is excluded.
+This independent Crystal Nexus implements the [original conversational brief](https://chatgpt.com/share/6ac05873-6728-83ec-a932-66616dcb794a?ogimg=plain) in `dream-unity/start-fresh`. Dream World is a conceptual region; God's Earth View and the existing Dream Unity deployments are outside its scope.
+
+## Product boundary
+
+Visitors open the website and speak or type without an account, ChatGPT subscription, application download, or credentials. The owner supplies a separate hosted AI connection and its allowance. Personal ChatGPT Pro usage has not been established as a supported anonymous visitor pool. The retained local OAuth implementation is developer compatibility code, not the public entry flow.
 
 ## Runtime boundaries
 
 | Component | Responsibility |
 | --- | --- |
-| `index.html`, `style.css` | Full-screen scene, central invitation, quiet text alternative, accessible dialogs and controls. |
-| `src/app.js` | Owns the current conversation, turn cancellation, visible state, scene changes, and explicit memory acceptance. |
-| `src/voice.js` | Owns one browser recognition turn or spoken reply at a time; reports capability and permission failures. |
-| `src/model.js` | Uses the signed-in ChatGPT plan through the local server, or an explicitly chosen experimental WebLLM/Ollama fallback; bounds context and streams text. |
-| `src/meaning.js` | Validates model-proposed navigation and memory data; removes the control channel from visible speech. |
-| `src/scene.js` | Draws one continuous Three.js environment, camera movement, regional geometry, and personal constellation nodes. |
-| `src/memory.js` | Manages consent, session/device storage, linked notes, archive/recovery, and validated import/export. |
-| `server.mjs` | Serves the project on loopback, handles protected ChatGPT OAuth and Responses, and offers an optional local Ollama proxy. |
-| `scripts/build.mjs` | Produces a static `dist` directory with a release revision manifest. |
+| `index.html`, `style.css` | Continuous scene, central invitation, text input, status and accessible constellation controls. |
+| `src/app.js` | Conversation ownership, cancellation, visible state, microphone continuation, scene changes and memory acceptance. |
+| `src/voice.js` | One recording or spoken reply at a time, silence detection, recording limit, manual send and complete capture cleanup. |
+| `src/model.js` | Public API client, bounded conversation context and validated model results; retained legacy adapters are not visitor choices. |
+| `src/runtime-config.js` | Public backend origin; empty uses the page's own server. Contains no secrets. |
+| `src/response-schema.js`, `src/meaning.js` | Strict response contract and allowlisted movement/memory proposals. |
+| `src/scene.js` | Continuous Three.js geometry, camera transitions, regional emphasis and constellation nodes. |
+| `src/memory.js` | Consent, session/device notes, links, archive/recovery and validated import/export. |
+| `api/nexus.mjs` | Node serverless adapter for `/api/nexus`; propagates disconnects and cancels abandoned requests. |
+| `server/public-api.mjs` | Operation dispatch, allowed origins, bounded inputs, timeout, per-instance rate limits and owner identity. |
+| `server/public-model.mjs` | Server-owned instructions, GPT request, response bounds and complete structured-output validation. |
+| `server/public-audio.mjs` | Bounded recording forwarding and transcription result validation. |
+| `scripts/build.mjs` | Static assets in `dist` and a source revision manifest. The API must be deployed separately alongside these assets. |
 
 ## A conversational turn
 
-1. The visitor selects Continue with ChatGPT and authorizes their eligible plan through OpenAI. An account-specific live model catalog supplies the model picker. Sign-in opens separately to preserve session notes and conversation. Experimental browser/local alternatives require an explicit choice; microphone support and model availability are separate.
-2. A deliberate entry action begins the experience. The fixed opening is “Tell me why you are here.” It is an invitation, not a generated answer.
-3. A recognised utterance or typed message joins the same session conversation. A bounded recent history and a bounded selection of active, approved constellation notes become model context.
-4. All runtimes constrain generation to a shared JSON schema containing the reply, region, focus and optional memory proposal. The adapter exposes only the reply while streaming, validates the completed JSON, and produces the internal `<navigation>` marker. The application validates that bounded intent again and displays only the spoken text.
-5. A valid region changes the camera and emphasis within the same scene. Blue/cyan Machine holds possibility; emerald Maker holds agency; violet World holds encounter and consequences; Unity connects them.
-6. Browser speech synthesis can speak the reply. A deliberately started voice conversation continues only after successful completion, while it still owns the turn and no blocking dialog is open. Pause, errors, hidden-page transitions, and cancellation prevent stale continuation.
-7. A memory suggestion appears as a proposal. It becomes a constellation note only after the visitor opens the editor and explicitly keeps it.
+1. A deliberate entry action begins with “Tell me why you are here.” This fixed invitation is not presented as a generated answer. A connection check establishes backend configuration, not paid allowance or successful inference.
+2. The browser captures a short microphone turn with MediaRecorder where supported. Silence can end it; manual send ends it immediately; a 45-second limit bounds capture. Typing bypasses recording and transcription.
+3. `/api/nexus?op=transcribe` receives the recording and returns text. Audio is passed to the configured provider for that request, not stored by this application.
+4. The current utterance joins bounded session history. The frontend sends it with a bounded set of active notes the visitor explicitly kept to `/api/nexus?op=chat`.
+5. The server obtains its deployment's Gateway token. Only server configuration chooses the upstream and model. Visitor-supplied system messages cannot replace the canonical instructions.
+6. GPT returns `reply`, `region`, `focus` and an optional memory proposal under a constrained JSON schema. Both server and client validate the result. The public route returns a complete validated answer; it does not stream partial unvalidated prose into speech.
+7. An allowed region changes the camera in the same environment: Machine is possibility, Maker is agency, World is encounter and consequence, and Unity connects them. Browser speech synthesis speaks the reply.
+8. A deliberately active voice conversation may begin its next recording only after the reply completes and the current turn still owns the session. Pause, page hiding, errors and cancellation prevent late results from restarting the microphone.
+9. A proposed memory becomes a note only after the visitor explicitly keeps it. A generated proposal cannot save itself.
 
-Explicit navigation commands such as “go to Dream Machine” also work without a loaded model. They are user commands, not simulated AI replies. If a model is unavailable, the application preserves available exploration and note-taking while reporting the limitation.
+Explicit navigation commands can work without an AI response. These are direct user commands, not simulated conversational intelligence. When the backend is unavailable, the app reports that limitation while retaining exploration and note-taking.
+
+## Identity, spending and isolation
+
+The public function uses the owner's **Vercel OIDC deployment identity** for AI Gateway. Tokens remain server-side; they are not supplied by visitors, embedded in static assets, or copied from a personal ChatGPT session. The default conversation model is `openai/gpt-4.1-mini`; transcription uses `openai/whisper-1`.
+
+Allowed origins isolate browser callers. They do not authenticate people or defeat non-browser clients that spoof an Origin header. Per-instance concurrency and expiring request counters reduce abuse but are not durable global limits. The owner must configure Gateway project spending controls and review account availability before release. No automatic alternate billing path or provider switch is used.
+
+Provider failures are mapped to safe visitor messages; raw provider bodies, tokens and stack traces are not returned. A configured OIDC token does not prove a positive balance or provider entitlement. Only completed real chat and transcription requests verify those paths.
 
 ## Memory and privacy
 
-The default is **session-only constellation memory**, with no durable transcript storage by this application. A separate ChatGPT account grant enables model use, but does not load ChatGPT history or turn on constellation saving. A previous saved constellation is not parsed or exposed on construction. Restoring it or enabling “Remember my constellation on this device” is an explicit action that merges saved and current notes before writing.
+Constellation memory defaults to **session only**. Account sign-in is not part of the public flow, and keeping a note does not enable device saving. A previous device copy is not silently loaded. Restoring saved notes or enabling remembering is explicit.
 
-Switching an active remembered constellation back to session-only removes its saved device copy while retaining current notes in memory. A fresh session does not delete older, unopened saved notes. Clearing operates on the active constellation. If device storage fails, current notes remain usable and exportable in memory; the interface receives a persistent warning when an older device copy may still exist.
+Turning remembering off removes the saved device copy while retaining active notes. A fresh session does not delete older, unopened notes. Storage failures preserve in-memory work and export access, with a warning if a prior device copy could not be removed.
 
-Notes have stable IDs, a kind, region, text, creation/update times, explicit links, and an `archived` flag. The visitor can edit, link, archive, recover, delete, export, and import them. Archiving preserves content and relationships but excludes the note from the active scene and future note context. Deletion removes inbound links. It does not rewrite earlier dialogue in the session transcript.
+Notes have stable IDs, kind, region, text, timestamps, explicit links and an archived flag. Archive preserves content and links while excluding notes from the active scene and future model context. Deletion removes inbound links but does not rewrite earlier session dialogue. Imports are validated transactionally: at most 250 notes, 2,000 characters per stored note, 50 links per note and a 1 MB document. The editor uses a shorter 600-character limit.
 
-The version-1 JSON format accepts older version-1 entries without an archive flag as active notes. Validation is transactional and bounded: 250 notes, 2,000 characters per stored note, 50 links per note, and a 1 MB document. The note editor offers a shorter 600-character input. Invalid imports leave the current constellation unchanged. Device saves are plain browser storage, not encrypted storage; another person using that browser profile can access them.
-
-## Model and voice limits
-
-The primary connection uses eligible ChatGPT-plan OAuth for a personal/local open-source app. Protected tokens remain outside the repository and browser, in the local account store. The server validates the issued registration, signed identity, granted scope, current account model, and completed Responses stream. Disconnect cancels in-flight requests. No API-key fallback or automatic billing switch exists. A public static page cannot run this local connection; remotely hosted subscription integrations require OpenAI approval. See [chatgpt-subscription.md](chatgpt-subscription.md).
-
-Browser inference uses the pinned WebLLM runtime and a Qwen2.5 1.5B model; model downloads require network access, compatible WebGPU hardware, and substantial device memory. Local inference requires the project server and an installed Ollama model on the same computer. A static hosted copy does not provide the local server. Neither option silently switches to a paid model API. See [model-runtime.md](model-runtime.md) for exact versions, upstream references, resource estimates, and protocol details.
-
-Speech recognition may use the browser vendor's network service. Local text inference therefore does not imply local-only microphone processing. Recognition, speech synthesis, and WebGPU availability are separate browser capabilities. Unsupported speech leaves typed conversation available. The small language model may misunderstand the framework, miss a navigation marker, or offer a poor interpretation; its output is a revisable suggestion, not a psychological measurement.
-
-The scene receives listening and speaking state for visual feedback. State-driven illumination is not evidence that the scene has measured microphone amplitude. Actual microphone amplitude, audible playback, browser GPU compatibility, and model answer quality require separate live verification.
+The application does not persist recordings or server-side transcripts. Active conversation and approved notes are nevertheless processed by the hosted model; microphone recordings are processed by the transcription provider. Provider policies are separate from application storage. Device storage is plain browser storage, not encryption.
 
 ## Verification boundary
 
-The acceptance target is recorded in [acceptance.md](acceptance.md). Unit and deterministic browser tests can establish application state transitions, cancellation behavior, consent rules, validated navigation, and memory operations. Mock model or speech fixtures do not establish real model inference or working hardware audio. Release evidence must distinguish those fixtures from a real downloaded-model smoke test and a real-device spoken conversation.
+Deterministic tests establish cancellation, consent, request validation, provider error handling and interaction behavior with explicit fixtures. They do not prove a live deployment, usable owner credits, real microphone transcription, audible speech or model interpretation quality. See [verification.md](verification.md) for current evidence and release blockers.
 
-The historical nine games and Become destinations have not been specified or implemented here. The guide must not claim to open them or any other unavailable external destination. The application is designed to explore the Dream Unity framework through dialogue, not to establish literal simulation theory or make diagnostic claims.
+Historical games and Become remain unspecified and unimplemented. Model interpretations are revisable suggestions, not diagnosis or proof of a literal simulation theory.

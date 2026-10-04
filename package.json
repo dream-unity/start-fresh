@@ -5,7 +5,7 @@
   "type": "module",
   "description": "A continuous, conversational Crystal Nexus with a personal constellation.",
   "engines": {
-    "node": ">=22"
+    "node": "24.x"
   },
   "scripts": {
     "start": "node scripts/launch.mjs",
@@ -15,5 +15,8 @@
     "check": "npm test && npm run build",
     "test:browser": "node scripts/browser-check.cjs",
     "test:inference": "node scripts/inference-smoke.mjs"
+  },
+  "dependencies": {
+    "@vercel/oidc": "4.0.0"
   }
 }

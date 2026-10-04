@@ -7,6 +7,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { RESPONSE_SCHEMA } from './src/response-schema.js';
 import { streamChatGPTResponse, ChatGPTResponseError } from './server/chatgpt-responses.mjs';
 import { createChatGPTAuth, ChatGPTAuthError } from './server/chatgpt-auth.mjs';
+import publicNexus from './api/nexus.mjs';
 
 const PROJECT_ROOT = fileURLToPath(new URL('.', import.meta.url));
 const MAX_BODY_BYTES = 40 * 1024;
@@ -281,6 +282,7 @@ export function createAppServer({
     const origin = requestOrigin(req, server);
     if (!origin) return json(res, 403, { error: 'Only requests addressed to this loopback server are accepted.' });
     const route = req.url?.split('?')[0];
+    if (route === '/api/nexus') return publicNexus(req,res);
 
     if (route === '/auth/callback') {
       if (req.method !== 'GET') return json(res, 405, { error: 'Use GET for the sign-in callback.' });

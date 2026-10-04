@@ -1,6 +1,6 @@
 /* Deterministic application acceptance. Speech and model replies are MOCKED.
- * This verifies integration and UI lifecycle, not hardware, live OAuth consent,
- * subscription eligibility, or real inference.
+ * This verifies anonymous public-app integration and audio lifecycle, not a
+ * physical microphone, production availability, or real GPT inference.
  */
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -38,23 +38,31 @@ async function startServer() {
   throw new Error(`Test server did not become ready: ${serverLog}`);
 }
 
-async function speechFixture(context, denied = false) {
-  await context.addInitScript(({ denied }) => {
-    const fixture = { active: null, starts: 0, aborts: 0, utterances: [], denied };
-    class Recognition {
-      start() {
-        this.running = true;
-        fixture.active = this;
-        fixture.starts++;
+async function speechFixture(context, { denied = false, recording = true, nativeRecognition = false } = {}) {
+  await context.addInitScript(({ denied, recording, nativeRecognition }) => {
+    const fixture = { active: null, starts: 0, nativeStarts: 0, stoppedTracks: 0, utterances: [], audioText: '', denied };
+    class Recognition { start() { fixture.nativeStarts++; throw new Error('Public capture must use the recorder, not native recognition.'); } }
+    class Recorder {
+      static isTypeSupported(type) { return type === 'audio/webm'; }
+      constructor(_stream, { mimeType = 'audio/webm' } = {}) { this.mimeType = mimeType; this.state = 'inactive'; fixture.active = this; }
+      start() { this.state = 'recording'; queueMicrotask(() => { if (this.state === 'recording') this.onstart?.(); }); }
+      stop() {
+        this.state = 'inactive';
         queueMicrotask(() => {
-          if (!this.running) return;
-          if (fixture.denied) { this.running = false; this.onerror?.({ error: 'not-allowed' }); }
-          else this.onstart?.();
+          this.ondataavailable?.({ data: new Blob(['MOCK_AUDIO:' + fixture.audioText], { type: this.mimeType }) });
+          this.onstop?.();
         });
       }
-      stop() { this.running = false; queueMicrotask(() => this.onend?.()); }
-      abort() { fixture.aborts++; this.running = false; queueMicrotask(() => this.onend?.()); }
     }
+    const mediaDevices = { getUserMedia: async () => {
+      fixture.starts++;
+      if (fixture.denied) throw new DOMException('Fixture denied permission.', 'NotAllowedError');
+      const track = {
+        readyState: 'live', addEventListener() {}, removeEventListener() {},
+        stop() { if (this.readyState !== 'ended') fixture.stoppedTracks++; this.readyState = 'ended'; },
+      };
+      return { getTracks: () => [track], getAudioTracks: () => [track] };
+    } };
     class Utterance { constructor(text) { this.text = text; } }
     let synthesisGeneration = 0;
     const synthesis = {
@@ -70,84 +78,76 @@ async function speechFixture(context, denied = false) {
       },
       cancel() { synthesisGeneration++; },
     };
-    fixture.emit = text => {
-      if (!fixture.active?.running) throw new Error('No mocked recognition turn is active.');
-      const result = [{ transcript: text, confidence: 0.98 }];
-      result.isFinal = true;
-      fixture.active.onresult?.({ resultIndex: 0, results: [result] });
-    };
-    Object.defineProperty(window, 'SpeechRecognition', { configurable: true, value: Recognition });
-    Object.defineProperty(window, 'webkitSpeechRecognition', { configurable: true, value: Recognition });
+    Object.defineProperty(window, 'SpeechRecognition', { configurable: true, value: nativeRecognition ? Recognition : undefined });
+    Object.defineProperty(window, 'webkitSpeechRecognition', { configurable: true, value: undefined });
+    Object.defineProperty(window, 'MediaRecorder', { configurable: true, value: recording ? Recorder : undefined });
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: recording ? mediaDevices : undefined });
+    Object.defineProperty(window, 'AudioContext', { configurable: true, value: undefined });
+    Object.defineProperty(window, 'webkitAudioContext', { configurable: true, value: undefined });
     Object.defineProperty(window, 'SpeechSynthesisUtterance', { configurable: true, value: Utterance });
     Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: synthesis });
     window.__speechFixture = fixture;
-  }, { denied });
+  }, { denied, recording, nativeRecognition });
 }
 
-function ndjson(text, region = 'unity', memory = null) {
-  const reply = JSON.stringify({ reply: text, region, focus: `A ${region} perspective`, memory });
-  // This is the same constrained JSON envelope requested from the actual model.
-  // Seven-character pieces also exercise partial property names and escaped
-  // strings; only decoded reply text may reach the visible conversation.
-  const pieces = reply.match(/[\s\S]{1,7}/g);
-  return pieces.map(content => JSON.stringify({ message: { role: 'assistant', content }, done: false })).join('\n') + '\n' + JSON.stringify({ done: true }) + '\n';
+function reply(text, region = 'unity', memory = null) {
+  return { reply: text, region, focus: `A ${region} perspective`, memory };
 }
 
-async function mockModel(page, { connected = true } = {}) {
-  const requests = [];
+async function mockModel(page, { available = true } = {}) {
+  const requests = [], audioRequests = [];
+  const counts = { status: 0 };
   let pendingRelease = null;
   let heldResolve;
   const held = new Promise(resolve => { heldResolve = resolve; });
-  await page.route('**/api/chatgpt/status', route => route.fulfill({
-    status: 200, contentType: 'application/json',
-    body: JSON.stringify({
-      connected, sharing: connected,
-      account: connected ? { id: 'fixture', label: 'Fixture account', selectedModel: 'fixture-gpt' } : null,
-      accounts: [],
-    }),
-  }));
-  await page.route('**/api/chatgpt/models', route => route.fulfill({
-    status: 200, contentType: 'application/json',
-    body: JSON.stringify({ models: connected ? [{ slug: 'fixture-gpt', display_name: 'Fixture GPT' }] : [] }),
-  }));
-  await page.route('**/api/chatgpt/model', async route => {
-    assert.equal(route.request().method(), 'POST');
-    assert.equal(connected, true);
-    assert.equal(route.request().headers()['x-dream-unity-account'], 'fixture', 'Model selection must be bound to the displayed account.');
-    assert.match(route.request().headers()['content-type'] || '', /^application\/json(?:;|$)/);
-    assert.deepEqual(route.request().postDataJSON(), { model: 'fixture-gpt' });
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, model: 'fixture-gpt' }) });
-  });
-  await page.route('**/api/chatgpt/chat', async route => {
-    assert.equal(route.request().method(), 'POST');
-    assert.equal(route.request().headers()['x-dream-unity-account'], 'fixture', 'A conversation must stay bound to the selected account.');
-    assert.match(route.request().headers()['content-type'] || '', /^application\/json(?:;|$)/);
-    const body = route.request().postDataJSON();
+  const headers = { 'access-control-allow-origin': origin, 'access-control-allow-methods': 'GET, POST, OPTIONS', 'access-control-allow-headers': 'Content-Type, Accept' };
+  const json = (route, body) => route.fulfill({ status: 200, contentType: 'application/json', headers, body: JSON.stringify(body) });
+  await page.route(/\/api\/nexus(?:\?|$)/, async route => {
+    const request = route.request();
+    if (request.method() === 'OPTIONS') return route.fulfill({ status: 204, headers });
+    const op = new URL(request.url()).searchParams.get('op');
+    const requestHeaders = request.headers();
+    assert.equal(requestHeaders.authorization, undefined, 'Public visitors must not supply an access token.');
+    assert.equal(requestHeaders['x-dream-unity-account'], undefined, 'Public visitors must not select an account.');
+    assert.equal(requestHeaders.cookie, undefined, 'Public API requests must omit cookies.');
+    if (op === 'status') {
+      assert.equal(request.method(), 'GET');
+      counts.status++;
+      return json(route, { ready: available, model: 'openai/gpt-fixture', ...(!available && { error: 'The guide is temporarily unavailable.' }) });
+    }
+    assert.equal(request.method(), 'POST');
+    if (op === 'transcribe') {
+      assert.match(requestHeaders['content-type'] || '', /^audio\/webm(?:;|$)/);
+      const audio = request.postDataBuffer();
+      assert.ok(audio?.length, 'One audio turn must be uploaded.');
+      const fixtureAudio = audio.toString();
+      assert.ok(fixtureAudio.startsWith('MOCK_AUDIO:'), 'This suite only submits explicitly simulated audio.');
+      audioRequests.push(fixtureAudio);
+      return json(route, { text: fixtureAudio.slice('MOCK_AUDIO:'.length) });
+    }
+    assert.equal(op, 'chat', 'Only documented public operations may be called.');
+    assert.match(requestHeaders['content-type'] || '', /^application\/json(?:;|$)/);
+    const body = request.postDataJSON();
     requests.push(body);
-    // Keep this strict: the real server rejects extra request keys.
-    assert.deepEqual(Object.keys(body).sort(), ['messages', 'model'], 'Client/server request schema must agree.');
-    assert.equal(body.model, 'fixture-gpt', 'Inference must use the selected account model.');
-    assert.equal(connected, true, 'Inference must require an authorized subscription connection.');
+    assert.deepEqual(Object.keys(body).sort(), ['context', 'messages']);
+    assert.ok(body.messages.every(message => ['user', 'assistant'].includes(message.role)), 'The server owns its privileged instructions.');
+    assert.ok(Array.isArray(body.context.memory));
     const input = body.messages.filter(message => message.role === 'user').at(-1)?.content || '';
     let response;
     if (input.includes('WAIT_FOR_CANCEL')) {
       heldResolve();
       await new Promise(resolve => { pendingRelease = resolve; });
-      response = ndjson('LATE_REPLY_MUST_NOT_APPEAR', 'machine');
+      response = reply('LATE_REPLY_MUST_NOT_APPEAR', 'machine');
     } else if (/possibilit|ideas|imagine/i.test(input)) {
-      response = ndjson('We can give your possibilities some space. What is one direction you would like to explore?', 'machine', { kind: 'goal', text: 'Explore possibilities for a creative project.' });
+      response = reply('We can give your possibilities some space. What is one direction you would like to explore?', 'machine', { kind: 'goal', text: 'Explore possibilities for a creative project.' });
     } else if (/action|choose|step/i.test(input)) {
-      response = ndjson('You have a direction. Choose one small action you can call "a beginning" today.', 'maker');
+      response = reply('You have a direction. Choose one small action you can call "a beginning" today.', 'maker');
     } else if (/evidence|consequence|actually happened/i.test(input)) {
-      response = ndjson('Let us compare your expectation with the evidence of what actually happened.', 'world');
-    } else {
-      response = ndjson('Tell me why you are here.', 'unity');
-    }
-    await route.fulfill({ status: 200, contentType: 'application/x-ndjson', body: response }).catch(error => {
-      if (!input.includes('WAIT_FOR_CANCEL')) throw error;
-    });
+      response = reply('Let us compare your expectation with the evidence of what actually happened.', 'world');
+    } else response = reply('Tell me why you are here.', 'unity');
+    await json(route, response).catch(error => { if (!input.includes('WAIT_FOR_CANCEL')) throw error; });
   });
-  return { requests, held, authorize: () => { connected = true; }, release: () => pendingRelease?.() };
+  return { requests, audioRequests, counts, held, makeAvailable: () => { available = true; }, release: () => pendingRelease?.() };
 }
 
 function watchErrors(page) {
@@ -165,27 +165,25 @@ function watchErrors(page) {
   return errors;
 }
 
-async function ready(page) {
+async function ready(page, { guideReady = true } = {}) {
   await page.goto(origin, { waitUntil: 'networkidle' });
   await page.locator('#enter').waitFor({ state: 'visible' });
   await page.waitForFunction(() => document.querySelector('#nexus')?.dataset.renderer === 'webgl');
   assert.equal(await page.locator('#nexus').getAttribute('data-region'), 'unity');
+  await page.waitForFunction(available => {
+    const text = document.querySelector('#runtime-status')?.textContent || '';
+    return available ? text.includes('connected') : text.includes('unavailable');
+  }, guideReady);
+  assert.equal(await page.locator('#connect-chatgpt,#chatgpt-model,#use-chatgpt,#use-local,#use-browser,#alternative-models,#plan-indicator').count(), 0,
+    'Visitors must not be asked for an account, subscription, installation, or model selection.');
+  assert.ok(!/ollama|npm start|model download|your ChatGPT|subscribe|API key/i.test(await page.locator('body').textContent()),
+    'Public UI must not expose owner setup as a visitor step.');
 }
 
 async function connect(page) {
   await page.locator('#enter').click();
-  await page.locator('#setup').waitFor({ state: 'visible' });
-  await page.locator('#use-chatgpt').waitFor({ state: 'visible' });
-  await page.waitForFunction(() => document.querySelector('#chatgpt-model')?.value === 'fixture-gpt'
-    && !document.querySelector('#use-chatgpt')?.disabled);
-  assert.equal(await page.locator('#chatgpt-model').inputValue(), 'fixture-gpt');
-  await page.locator('#use-chatgpt').click();
-  await page.locator('#setup').waitFor({ state: 'hidden' });
-  // Model initialization can be a long download. A fresh explicit activation
-  // after it completes preserves the browser's microphone permission gesture.
-  await page.locator('#enter').click();
   await page.locator('#spoken').waitFor({ state: 'visible' });
-  assert.match(await page.locator('#runtime-status').textContent(), /ChatGPT/i);
+  assert.equal(await page.locator('#setup').isVisible(), false, 'A ready guide should enter directly.');
 }
 
 async function typeTurn(page, text, expectedRegion) {
@@ -207,6 +205,7 @@ async function main() {
   await startServer();
   browser = await chromium.launch({ headless: true, args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
   const desktop = await browser.newContext({ viewport: { width: 1440, height: 1000 }, reducedMotion: 'reduce' });
+  await desktop.addCookies([{ name: 'must-not-reach-guide', value: 'fixture', url: origin }]);
   await speechFixture(desktop);
   const page = await desktop.newPage();
   const errors = watchErrors(page);
@@ -218,10 +217,10 @@ async function main() {
   await page.screenshot({ path: path.join(output, 'desktop-initial.png') });
   pass('Real WebGL scene; no microphone, inference, or persistence before consent');
 
-  await connect(page);
-  await page.waitForFunction(() => window.__speechFixture.active?.running);
-  await page.evaluate(() => window.__speechFixture.emit('I want to explore possibilities for a creative project.'));
-  await page.waitForFunction(() => document.querySelector('#region-title')?.textContent.includes('Dream Machine'));
+  assert.equal(model.counts.status, 1, 'Initial preflight performs one status request.');
+  await typeTurn(page, 'I want to explore possibilities for a creative project.', 'Dream Machine');
+  assert.equal(await page.evaluate(() => window.__speechFixture.starts), 0, 'Typed entry must not open the microphone.');
+  assert.deepEqual(model.requests[0].context.memory, [], 'Unconfirmed memories must not be sent as personal context.');
   assert.equal(await page.locator('#nexus').getAttribute('data-region'), 'machine');
   await page.locator('#proposal').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#memory-count').textContent(), '0', 'A proposed memory must not already be saved.');
@@ -232,9 +231,10 @@ async function main() {
   await page.locator('#note-editor').waitFor({ state: 'hidden' });
   await page.waitForFunction(() => document.querySelector('#memory-count')?.textContent.trim() === '1');
   assert.equal(await page.evaluate(key => localStorage.getItem(key), MEMORY_KEY), null, 'Session notes must remain in memory.');
-  pass('Mock recognition → model reply → scene navigation; memory requires review and explicit acceptance');
+  pass('Anonymous typed entry → structured guide reply → scene navigation; memory requires review and explicit acceptance');
 
   await typeTurn(page, 'Help me choose one small action.', 'Dream Maker');
+  assert.ok(model.requests.at(-1).context.memory.some(note => note.text === 'Explore possibilities for my own creative project.'), 'Only accepted notes become model context.');
   await typeTurn(page, 'What evidence shows what actually happened?', 'Dream World');
   await page.waitForFunction(() => !document.querySelector('#spoken-text')?.textContent.includes('<navigation'));
   assert.ok((await page.locator('#spoken-text').textContent()).includes('evidence'));
@@ -244,7 +244,7 @@ async function main() {
 
   await typeTurn(page, 'WAIT_FOR_CANCEL');
   await model.held;
-  const cancelledRequest = page.waitForEvent('requestfailed', { predicate: request => request.url().endsWith('/api/chatgpt/chat') });
+  const cancelledRequest = page.waitForEvent('requestfailed', { predicate: request => new URL(request.url()).searchParams.get('op') === 'chat' });
   await page.locator('#interrupt').click();
   await cancelledRequest;
   model.release();
@@ -278,48 +278,32 @@ async function main() {
   pass('Device persistence is opt-in; explicit reload restore and deletion work through the real UI');
   assert.deepEqual(errors, [], 'Desktop must have no local JavaScript or console errors.');
 
-  const unsignedContext = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: 'reduce' });
-  await speechFixture(unsignedContext);
-  const unsignedPage = await unsignedContext.newPage();
-  const unsignedErrors = watchErrors(unsignedPage);
-  const unsignedModel = await mockModel(unsignedPage, { connected: false });
-  const fixtureAuthorization = 'https://auth.openai.com/api/accounts/authorize?client_id=fixture-client&state=fixture-state';
-  let authorizationRequests = 0;
-  await unsignedContext.route('https://auth.openai.com/**', async route => {
-    assert.equal(route.request().url(), fixtureAuthorization, 'Only the expected mocked authorization destination may be opened.');
-    authorizationRequests++;
-    await route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>Mock authorization</title><p>MOCK AUTHORIZATION. No OpenAI account is contacted.</p>' });
-  });
-  await unsignedPage.route('**/api/chatgpt/auth/start', async route => {
-    assert.equal(route.request().method(), 'POST');
-    assert.match(route.request().headers()['content-type'] || '', /^application\/json(?:;|$)/);
-    assert.deepEqual(route.request().postDataJSON(), {}, 'Sign-in start must satisfy the local server JSON request contract.');
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ url: fixtureAuthorization }) });
-  });
-  await ready(unsignedPage);
-  await unsignedPage.locator('#enter').click();
-  await unsignedPage.locator('#connect-chatgpt').waitFor({ state: 'visible' });
-  assert.equal(await unsignedPage.locator('#use-chatgpt').isVisible(), false, 'Unsigned visitors cannot start subscription inference.');
-  const popupOpened = unsignedPage.waitForEvent('popup');
-  await unsignedPage.locator('#connect-chatgpt').click();
-  const popup = await popupOpened;
-  await popup.waitForURL(fixtureAuthorization);
-  await popup.getByText('MOCK AUTHORIZATION. No OpenAI account is contacted.', { exact: true }).waitFor();
-  assert.equal(authorizationRequests, 1);
-  assert.equal(unsignedModel.requests.length, 0, 'Opening authorization must not start inference.');
-  unsignedModel.authorize();
-  await popup.close();
-  await unsignedPage.locator('#check-chatgpt').click();
-  await unsignedPage.locator('#use-chatgpt').waitFor({ state: 'visible' });
-  await unsignedPage.locator('#use-chatgpt').click();
-  await unsignedPage.locator('#setup').waitFor({ state: 'hidden' });
-  await typeTurn(unsignedPage, 'Help me choose one action.', 'Dream Maker');
-  assert.equal(unsignedModel.requests.length, 1);
-  assert.deepEqual(unsignedErrors, [], 'Mocked sign-in and manual connection recheck must complete without errors.');
-  pass('Unsigned setup → mocked OpenAI authorization popup → explicit connection recheck → selected GPT conversation');
+  const recoveryContext = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: 'reduce' });
+  await speechFixture(recoveryContext);
+  const recoveryPage = await recoveryContext.newPage();
+  const recoveryErrors = watchErrors(recoveryPage);
+  const recoveringGuide = await mockModel(recoveryPage, { available: false });
+  await ready(recoveryPage, { guideReady: false });
+  assert.equal(recoveringGuide.counts.status, 1);
+  assert.equal(await recoveryPage.evaluate(() => window.__speechFixture.starts), 0);
+  await recoveryPage.locator('#memory-open').click();
+  await closeDialog(recoveryPage, '#constellation');
+  assert.equal(recoveringGuide.counts.status, 1, 'Exploring notes must not trigger a retry loop.');
+  await recoveryPage.locator('#enter').click();
+  await recoveryPage.locator('#setup').waitFor({ state: 'visible' });
+  await recoveryPage.waitForFunction(() => !document.querySelector('#retry-connection')?.disabled);
+  assert.equal(recoveringGuide.counts.status, 2, 'An explicit entry may recheck once.');
+  recoveringGuide.makeAvailable();
+  await recoveryPage.locator('#retry-connection').click();
+  await recoveryPage.locator('#setup').waitFor({ state: 'hidden' });
+  assert.equal(recoveringGuide.counts.status, 3, 'Retry is an explicit bounded request.');
+  assert.equal(await recoveryPage.evaluate(() => window.__speechFixture.starts), 0, 'Restored service must not activate a microphone by itself.');
+  await typeTurn(recoveryPage, 'Help me choose one action.', 'Dream Maker');
+  assert.deepEqual(recoveryErrors, []);
+  pass('One initial preflight; unavailable guide recovers only after explicit retry without opening audio');
 
   const deniedContext = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: 'reduce' });
-  await speechFixture(deniedContext, true);
+  await speechFixture(deniedContext, { denied: true });
   const deniedPage = await deniedContext.newPage();
   const deniedErrors = watchErrors(deniedPage);
   await mockModel(deniedPage);
@@ -332,26 +316,52 @@ async function main() {
   assert.deepEqual(deniedErrors, [], 'Permission rejection must be handled without uncaught errors.');
   pass('Mock microphone permission denial remains stable; typed conversation still works');
 
+  const unsupportedContext = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: 'reduce' });
+  await speechFixture(unsupportedContext, { recording: false });
+  const unsupportedPage = await unsupportedContext.newPage();
+  const unsupportedErrors = watchErrors(unsupportedPage);
+  await mockModel(unsupportedPage);
+  await ready(unsupportedPage);
+  await connect(unsupportedPage);
+  await unsupportedPage.waitForFunction(() => /cannot open a microphone/i.test(document.querySelector('#status')?.textContent || ''));
+  await typeTurn(unsupportedPage, 'Help me explore possibilities.', 'Dream Machine');
+  assert.equal(await unsupportedPage.evaluate(() => window.__speechFixture.starts), 0);
+  assert.deepEqual(unsupportedErrors, []);
+  pass('A browser without recording support retains a working typed conversation');
+
   const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true, reducedMotion: 'reduce' });
   await speechFixture(mobile);
   const mobilePage = await mobile.newPage();
   const mobileErrors = watchErrors(mobilePage);
-  await mockModel(mobilePage);
+  const mobileModel = await mockModel(mobilePage);
   await ready(mobilePage);
   assert.ok(await mobilePage.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'Mobile viewport must not overflow horizontally.');
   await mobilePage.screenshot({ path: path.join(output, 'mobile-initial.png') });
   await connect(mobilePage);
-  await typeTurn(mobilePage, 'Help me choose one action.', 'Dream Maker');
+  await mobilePage.waitForFunction(() => window.__speechFixture.active?.state === 'recording');
+  assert.equal(await mobilePage.evaluate(() => window.SpeechRecognition), undefined, 'This case must not depend on native speech recognition.');
+  await mobilePage.evaluate(() => { window.__speechFixture.audioText = 'Help me choose one action.'; });
+  await mobilePage.locator('#finish-capture').click();
+  await mobilePage.waitForFunction(() => document.querySelector('#nexus')?.dataset.region === 'maker'
+    && window.__speechFixture.starts === 2 && window.__speechFixture.active?.state === 'recording');
+  assert.equal(mobileModel.audioRequests.length, 1, 'One finished recording must produce one transcription request.');
+  assert.equal(mobileModel.requests.length, 1, 'A transcription must submit one conversation turn.');
+  await mobilePage.locator('#interrupt').click();
+  const startsAfterPause = await mobilePage.evaluate(() => window.__speechFixture.starts);
+  assert.equal(await mobilePage.evaluate(() => window.__speechFixture.stoppedTracks), startsAfterPause, 'Pause must release every opened microphone track.');
+  await typeTurn(mobilePage, 'Help me choose the next action.', 'Dream Maker');
+  assert.equal(await mobilePage.evaluate(() => window.__speechFixture.starts), startsAfterPause, 'Typing after Pause must never reopen capture.');
+  assert.equal(await mobilePage.evaluate(() => window.__speechFixture.nativeStarts), 0);
   await mobilePage.screenshot({ path: path.join(output, 'mobile-conversation.png') });
   assert.deepEqual(mobileErrors, [], 'Mobile must have no local JavaScript or console errors.');
-  pass('Mobile entry, setup, typed conversation, and actual WebGL rendering');
+  pass('Mobile MediaRecorder without native recognition → one transcription → reply → next turn; Pause releases tracks and stays paused');
 
   await fs.writeFile(path.join(output, 'browser-acceptance.json'), JSON.stringify({
     suite: 'Deterministic full-app acceptance',
-    model: 'MOCKED ChatGPT subscription status, catalog and NDJSON responses', speech: 'MOCKED recognition and synthesis',
-    authorization: 'MOCKED OpenAI popup page; no external account contacted',
+    model: 'MOCKED anonymous public status and structured GPT replies', speech: 'MOCKED MediaRecorder, microphone streams, transcription and synthesis',
+    authorization: 'No visitor authentication or account selection',
     renderer: 'Real Chromium WebGL via SwiftShader',
-    limitations: ['Does not validate physical microphone capture.', 'Does not validate live OAuth consent, subscription eligibility, or an actual GPT response.', 'The separate Ollama inference test exercises an optional fallback, not subscription inference.'],
+    limitations: ['Does not validate physical microphone capture or real audio encoding.', 'Does not validate production availability, real transcription, or an actual GPT response.'],
     checks, modelRequests: model.requests.length, passed: true,
   }, null, 2));
 }
