@@ -1,0 +1,5 @@
+page.waitForFunction: Timeout 30000ms exceeded.
+    at ready (/home/runner/work/start-fresh/start-fresh/scripts/browser-check.cjs:173:14)
+    at async main (/home/runner/work/start-fresh/start-fresh/scripts/browser-check.cjs:213:3)
+
+Dream Unity is ready at http://127.0.0.1:4173
