@@ -1,0 +1,21 @@
+{
+  "suite": "Deterministic full-app acceptance",
+  "model": "MOCKED Ollama NDJSON responses",
+  "speech": "MOCKED recognition and synthesis",
+  "renderer": "Real Chromium WebGL via SwiftShader",
+  "limitations": [
+    "Does not validate physical microphone capture.",
+    "Does not validate a real model response; use the separate inference smoke test."
+  ],
+  "checks": [
+    "Real WebGL scene; no microphone, inference, or persistence before consent",
+    "Mock recognition → model reply → scene navigation; memory requires review and explicit acceptance",
+    "Machine → Maker → World in one scene; control metadata excluded from speech and text",
+    "Interrupted response cannot speak, navigate, or enter the transcript after cancellation",
+    "Device persistence is opt-in; explicit reload restore and deletion work through the real UI",
+    "Mock microphone permission denial remains stable; typed conversation still works",
+    "Mobile entry, setup, typed conversation, and actual WebGL rendering"
+  ],
+  "modelRequests": 5,
+  "passed": true
+}
