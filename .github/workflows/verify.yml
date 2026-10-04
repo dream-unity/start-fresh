@@ -1,0 +1,105 @@
+name: Verify Start Fresh
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: start-fresh-verification
+  cancel-in-progress: true
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Unit tests and static build
+        run: npm run check
+      - name: Install pinned browser verification tools
+        run: |
+          npm install --prefix "$RUNNER_TEMP/nexus-browser" --no-save --ignore-scripts playwright@1.62.1
+          node "$RUNNER_TEMP/nexus-browser/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Verify complete browser journeys with simulated voice and model services
+        env:
+          NODE_PATH: ${{ runner.temp }}/nexus-browser/node_modules
+        run: npm run test:browser
+      - name: Preserve test output and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-evidence-${{ github.sha }}
+          path: output/
+          if-no-files-found: ignore
+      - name: Publish evidence in this repository only
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_KIND: browser
+        run: node scripts/publish-evidence.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: static-application-${{ github.sha }}
+          path: dist/
+  real-inference:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      OLLAMA_MODEL: qwen2.5:1.5b
+      OLLAMA_HOST: 127.0.0.1:11434
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Cache the local runtime and model
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/ollama-runtime
+            ~/.ollama/models
+          key: ollama-linux-0.35.1-qwen2.5-1.5b
+      - name: Install checksum-verified Ollama
+        run: |
+          if [ ! -x "$HOME/ollama-runtime/bin/ollama" ]; then
+            curl --fail --location --retry 3 https://github.com/ollama/ollama/releases/download/v0.35.1/ollama-linux-amd64.tar.zst --output "$RUNNER_TEMP/ollama.tar.zst"
+            echo '9fcd79ac4575b2bd31b992eee18b1000c8ad126b451627c8f8cd091714cfbb10  '"$RUNNER_TEMP/ollama.tar.zst" | sha256sum --check
+            mkdir -p "$HOME/ollama-runtime"
+            tar --zstd -xf "$RUNNER_TEMP/ollama.tar.zst" -C "$HOME/ollama-runtime"
+          fi
+          echo "$HOME/ollama-runtime/bin" >> "$GITHUB_PATH"
+      - name: Start Ollama and prepare model
+        run: |
+          mkdir -p output
+          ollama serve > output/ollama.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:11434/api/tags > /dev/null; then break; fi
+            sleep 1
+          done
+          ollama pull "$OLLAMA_MODEL"
+      - name: Verify real multi-turn inference through the app server
+        run: npm run test:inference
+      - name: Preserve real inference evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-inference-${{ github.sha }}
+          path: output/
+          if-no-files-found: ignore
+      - name: Publish evidence in this repository only
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_KIND: inference
+        run: node scripts/publish-evidence.mjs
