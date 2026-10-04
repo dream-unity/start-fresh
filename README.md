@@ -81,7 +81,7 @@ npm run build
 
 The GitHub Actions workflow runs unit/security tests, a Chromium end-to-end suite with **simulated speech and model responses**. A separate **real Ollama inference** smoke test is available through the manual workflow’s `verify_ollama` option, because Ollama is now an experimental alternative. A passing mocked browser test proves application behavior, not model quality or a successful account authorization. The Ollama semantic limitation above remains a real failure, not a passing inference result. A live ChatGPT authorization and completed response must be verified with an eligible user's consent. Browser-model GPU execution and a physical microphone also need checks on a compatible device.
 
-Results and screenshots are retained as workflow artifacts; the `verification-evidence` branch carries readable evidence tied to the source commit. See [acceptance criteria](docs/acceptance.md), [architecture](docs/architecture.md) and [runtime details](docs/model-runtime.md).
+Results and screenshots are retained as workflow artifacts; the `verification-evidence` branch carries readable evidence tied to the source commit. See the [verification record](docs/verification.md), [acceptance criteria](docs/acceptance.md), [architecture](docs/architecture.md) and [runtime details](docs/model-runtime.md).
 
 The original conversation mentioned historical games and Become without defining their implementation. This build does not claim to ship those unknown experiences. There is no Earth-view application, map embed, or connection to an existing Dream Unity deployment.
 

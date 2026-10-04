@@ -40,7 +40,7 @@ async function fixture(t) {
       authorization_endpoint: `${ISSUER}/api/accounts/authorize`, token_endpoint: `${ISSUER}/api/accounts/oauth/token`,
       jwks_uri: `${ISSUER}/.well-known/jwks.json`, revocation_endpoint: `${ISSUER}/api/accounts/oauth/revoke`,
       id_token_signing_alg_values_supported: ['RS256', 'ES256'], ...context.discoveryOverride });
-    if (address.endsWith('/.well-known/jwks.json')) return Response.json({ keys: [jwk] });
+    if (address.endsWith('/.well-known/jwks.json')) return context.keysHook ? context.keysHook(options) : Response.json({ keys: [jwk] });
     if (address.endsWith('/oauth/token')) {
       const form = new URLSearchParams(options.body);
       if (form.get('grant_type') === 'refresh_token') context.refreshes += 1;
@@ -276,6 +276,38 @@ test('disconnect in another instance invalidates a pending OAuth callback', asyn
   const second = f.make(); await second.disconnect();
   await assert.rejects(f.auth.callback(pending.callback), { code: 'auth_interrupted' });
   assert.equal((await second.status()).connected, false);
+});
+
+test('logout during first identity verification revokes the issued session and reports cleanup accurately', async t => {
+  for (const revocationSucceeds of [true, false]) await t.test(`revocation ${revocationSucceeds ? 'confirmed' : 'unconfirmed'}`, async sub => {
+    const f = await fixture(sub);
+    const verificationStarted = Promise.withResolvers();
+    const finishVerification = Promise.withResolvers();
+    let verificationSignal;
+    f.keysHook = async ({ signal }) => {
+      verificationSignal = signal;
+      verificationStarted.resolve();
+      await finishVerification.promise;
+      return Response.json({ keys: [jwk] });
+    };
+    if (!revocationSucceeds) f.revokeHook = () => new Response(null, { status: 503 });
+    const attempt = await f.begin();
+    const callback = f.auth.callback(attempt.callback);
+    const rejected = assert.rejects(callback, { code: 'auth_interrupted' });
+    await verificationStarted.promise;
+    const logout = f.auth.disconnect();
+    assert.equal(verificationSignal.aborted, false, 'issued-session verification must finish under its bounded timeout');
+    finishVerification.resolve();
+    await rejected;
+    const result = await logout;
+    assert.equal(result.connected, false);
+    assert.equal(result.revocationConfirmed, revocationSucceeds);
+    const revocations = f.calls.filter(call => call.url.endsWith('/oauth/revoke'));
+    assert.equal(revocations.length, revocationSucceeds ? 1 : 2);
+    assert.equal(new URLSearchParams(revocations[0].options.body).get('token'), 'fixture-refresh-token');
+    assert.equal((await f.saved()).registrations[0].tokens, null);
+    if (!revocationSucceeds) assert.match(result.message, /Remote revocation could not be confirmed/);
+  });
 });
 
 test('catalog from an old account cannot be assigned after cross-instance switching', async t => {

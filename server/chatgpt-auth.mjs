@@ -209,17 +209,17 @@ export function createChatGPTAuth({
     return value;
   }
 
-  async function verifyIdentity(idToken, { client, nonce, subject, refresh = false }) {
+  async function verifyIdentity(idToken, { client, nonce, subject, refresh = false, independent = refresh }) {
     const { header, payload, signature, signed } = unpackJWT(idToken);
     if (!['RS256', 'ES256'].includes(header.alg) || typeof header.kid !== 'string' || header.kid.length > 200
         || header.jku || header.x5u || header.jwk || header.crit !== undefined) throw failure('invalid_id_token', 'The returned identity uses an unsupported signing method.', 401);
     // A refresh may already have rotated the provider's session. Complete its
     // bounded verification so logout can revoke the latest token under lock.
-    const configuration = await discovery(refresh);
+    const configuration = await discovery(independent);
     if (Array.isArray(configuration.id_token_signing_alg_values_supported)
         && !configuration.id_token_signing_alg_values_supported.includes(header.alg)) throw failure('invalid_id_token', 'The returned identity uses an unsupported signing method.', 401);
     const fetchKeys = async () => {
-      const value = await request(configuration.jwks_uri, { headers: { accept: 'application/json' } }, { independent: refresh });
+      const value = await request(configuration.jwks_uri, { headers: { accept: 'application/json' } }, { independent });
       if (!Array.isArray(value?.keys) || value.keys.length > 50) throw failure('invalid_jwks', 'OpenAI signing keys could not be validated.', 502);
       jwksCache = { keys: value.keys, expires: now() + 15 * 60 * 1000 };
     };
@@ -347,10 +347,16 @@ export function createChatGPTAuth({
         const tokens = await request(TOKEN, { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({ grant_type: 'authorization_code', client_id: issuedClient, code,
             code_verifier: transaction.verifier, redirect_uri: transaction.redirectUri, resource: RESOURCE }) });
-        const identity = await verifyIdentity(tokens?.id_token, { client: issuedClient, nonce: transaction.nonce, subject: account.subject || transaction.subject });
+        // The exchange has already issued a renewable session. Finish bounded
+        // verification even if logout interrupts so its new token can be revoked.
+        const identity = await verifyIdentity(tokens?.id_token, { client: issuedClient, nonce: transaction.nonce,
+          subject: account.subject || transaction.subject, independent: true });
         const credentials = tokenRecord(tokens, identity);
         if (transaction.generation !== generation) {
-          if (credentials.refreshToken) await revoke(issuedClient, credentials.refreshToken);
+          if (credentials.refreshToken && !(await revoke(issuedClient, credentials.refreshToken))) {
+            state.revocationUnconfirmed = true;
+            await save(state);
+          }
           throw failure('auth_interrupted', 'Sign-in was stopped.');
         }
         account.subject = identity.sub; account.email = text(identity.email); account.name = text(identity.name);
@@ -431,9 +437,9 @@ export function createChatGPTAuth({
     return locked(async state => {
       state.authEpoch = (state.authEpoch || 0) + 1;
       const account = state.registrations.find(entry => entry.id === (accountId || state.activeId));
-      let revoked = !account?.tokens?.refreshToken;
+      let revoked = !account?.tokens?.refreshToken && !state.revocationUnconfirmed;
       if (account?.tokens?.refreshToken) {
-        revoked = await revoke(account.clientId, account.tokens.refreshToken);
+        revoked = (await revoke(account.clientId, account.tokens.refreshToken)) && !state.revocationUnconfirmed;
       }
       if (account) account.tokens = null;
       await save(state);
