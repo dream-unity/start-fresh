@@ -1,0 +1,25 @@
+{
+  "kind": "real-local-model-inference",
+  "startedAt": "2026-10-04T04:30:03.043Z",
+  "model": "qwen2.5:1.5b",
+  "syntheticInputsOnly": true,
+  "cases": [
+    {
+      "name": "possibilities move toward Dream Machine",
+      "input": "I do not know what I want to do with my life. I am torn between writing a novel and studying architecture, and want to explore those possibilities before choosing.",
+      "output": "Consider exploring both writing a novel and studying architecture to understand their potential paths better.\n<navigation>{\"region\":\"world\",\"focus\":\"Exploring possibilities\",\"memory\":null}</navigation>",
+      "text": "Consider exploring both writing a novel and studying architecture to understand their potential paths better.",
+      "intent": {
+        "region": "world",
+        "focus": "Exploring possibilities",
+        "memory": null
+      },
+      "streamedChunks": 17,
+      "durationMs": 10973,
+      "passed": false
+    }
+  ],
+  "passed": false,
+  "error": "possibilities move toward Dream Machine\n\n'world' !== 'machine'\n",
+  "durationMs": 11078
+}
