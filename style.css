@@ -4,3 +4,7 @@
 /* Keep the speaking words readable as crystals travel behind them. */
 .entered .spoken{padding:18px 20px;border-radius:24px;background:radial-gradient(ellipse at center,#060c16c9 15%,#060c1670 65%,transparent 78%)}
 @media(max-width:720px){.maker-label{width:110px}.world-label span{font-size:7px;margin-right:4px}.entered .spoken{padding:14px 8px}.session-status{min-width:min(290px,85vw)}}
+
+.subscription-option{border-top:0;padding-top:0}#chatgpt-connected label{display:block;font-size:12px;color:#adc5df;margin:18px 0 8px}#chatgpt-model{display:block;width:100%;margin:0 0 16px;background:#07111f;color:#d5e4f7;border:1px solid #adcbe450;border-radius:9px;padding:12px}#chatgpt-status{overflow-wrap:anywhere}#check-chatgpt{margin-top:8px}.plan-indicator{position:fixed;bottom:105px;left:50%;transform:translateX(-50%);z-index:3;font-size:8px;padding:2px 5px;max-width:85vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#chatgpt-confirmation{border-left:2px solid #9dc9e6;padding-left:12px}@media(max-height:620px){.plan-indicator{bottom:91px}}
+
+.entered .orientation{padding:10px 14px;border-radius:24px;background:radial-gradient(ellipse at center,#060c16d0,transparent 75%)}

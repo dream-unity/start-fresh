@@ -12,6 +12,104 @@ const motionPreference=matchMedia('(prefers-reduced-motion: reduce)');
 let region='unity', lastInterim='', motion=!motionPreference.matches;
 let loading=false, modelReady=false, lastFocus=null, openingAttempted=false, importEpoch=0;
 const OPENING='Tell me why you are here.';
+let connectionEpoch=0, oauthWindow=null, connectionBusy=false, chatgptAccount=null;
+const pageLocation=globalThis.location;
+const localSubscriptionRuntime=pageLocation?.hostname==='127.0.0.1'&&pageLocation?.protocol==='http:';
+
+async function connectionRequest(route,options={}) {
+  const response=await fetch(new URL(`api/chatgpt/${route}`,pageLocation.href),{
+    ...(options.method==='POST'&&{headers:{'Content-Type':'application/json'},body:'{}'}),
+    ...options,credentials:'same-origin',cache:'no-store',signal:AbortSignal.timeout(20_000),
+  });
+  const body=await response.json().catch(()=>({}));
+  if(!response.ok)throw new Error(body.error||'The local ChatGPT connection did not respond. Check the app’s terminal and try again.');
+  return body;
+}
+function connectionControls(busy) {
+  connectionBusy=busy;
+  for(const id of ['connect-chatgpt','check-chatgpt','disconnect-chatgpt'])$(id).disabled=busy;
+  $('use-chatgpt').disabled=busy||loading||!$('chatgpt-model').value;
+}
+async function checkChatGPT({confirmed=false}={}) {
+  if(!localSubscriptionRuntime) {
+    $('chatgpt-local-help').hidden=false;$('connect-chatgpt').hidden=true;$('check-chatgpt').hidden=true;
+    $('chatgpt-status').textContent='Your ChatGPT connection runs in the local version of this app.';
+    if(pageLocation?.hostname==='localhost')$('local-runtime-link').href=`http://127.0.0.1:${pageLocation.port||4173}`;
+    return;
+  }
+  const current=++connectionEpoch;
+  $('chatgpt-model').replaceChildren();
+  connectionControls(true);$('chatgpt-status').textContent='Checking your ChatGPT connection…';
+  try {
+    const info=await connectionRequest('status');
+    if(current!==connectionEpoch)return;
+    if(model.provider==='chatgpt'&&(!info.connected||!info.sharing||info.account?.id!==model.account?.id)) {
+      pauseSession('Choose your ChatGPT connection before continuing.');
+      modelReady=false;$('plan-indicator').hidden=true;
+      $('runtime-status').textContent='Choose and confirm the current ChatGPT account and model.';
+      updateControls();
+    }
+    chatgptAccount=info.account||null;
+    $('connect-chatgpt').hidden=Boolean(info.connected&&info.sharing);
+    $('check-chatgpt').hidden=false;
+    $('chatgpt-connected').hidden=!info.connected;
+    $('use-chatgpt').hidden=!info.sharing;
+    $('chatgpt-model').replaceChildren();
+    if(info.connected&&info.sharing) {
+      const {models=[]}=await connectionRequest('models');
+      if(current!==connectionEpoch)return;
+      for(const item of models) {
+        const option=document.createElement('option');option.value=item.slug;option.textContent=item.display_name||item.slug;
+        $('chatgpt-model').append(option);
+      }
+      if(models.some(item=>item.slug===info.account?.selectedModel))$('chatgpt-model').value=info.account.selectedModel;
+      $('chatgpt-status').textContent=`Connected as ${info.account?.label||info.account?.email||'your ChatGPT account'}. ${models.length?'Choose a model to begin.':'This account has no available models.'}`;
+      let acknowledged=false;
+      try {acknowledged=localStorage.getItem('dream-unity-plan-confirmed')==='yes';}catch{}
+      if(confirmed&&!acknowledged)$('chatgpt-confirmation').hidden=false;
+    } else {
+      $('chatgpt-status').textContent=info.message||(info.connected?'Signed in. Continue with ChatGPT to enable plan access.':'Continue with ChatGPT to connect your subscription.');
+    }
+  } catch(error) {
+    if(current!==connectionEpoch)return;
+    $('chatgpt-status').textContent=error.message;
+    $('check-chatgpt').hidden=false;
+    $('use-chatgpt').disabled=true;
+  } finally {if(current===connectionEpoch)connectionControls(false);}
+}
+async function connectChatGPT() {
+  if(connectionBusy||!localSubscriptionRuntime)return;
+  pauseSession();
+  if(model.provider==='chatgpt') {modelReady=false;$('plan-indicator').hidden=true;updateControls();}
+  // Open synchronously from the click, retaining the current conversation and
+  // session-only constellation in this window throughout OAuth navigation.
+  oauthWindow=window.open('about:blank','dream-unity-chatgpt','popup,width=620,height=780');
+  if(!oauthWindow){$('chatgpt-status').textContent='Allow this app to open its sign-in window, then choose Continue with ChatGPT again.';return;}
+  ++connectionEpoch;connectionControls(true);
+  try {
+    const {url}=await connectionRequest('auth/start',{method:'POST'});
+    const destination=new URL(url);
+    if(destination.origin!=='https://auth.openai.com'||destination.pathname!=='/api/accounts/authorize')throw new Error('The app returned an unexpected sign-in address.');
+    if(oauthWindow.closed)throw new Error('The sign-in window was closed. Choose Continue with ChatGPT to try again.');
+    oauthWindow.location.href=destination.href;
+    $('chatgpt-status').textContent='Complete sign-in in the OpenAI window. Then return here and check your connection.';
+    $('check-chatgpt').hidden=false;
+  } catch(error) {oauthWindow?.close();$('chatgpt-status').textContent=error.message;}
+  finally {connectionControls(false);}
+}
+async function disconnectChatGPT() {
+  if(connectionBusy)return;
+  ++connectionEpoch;pauseSession('Disconnecting your ChatGPT account…');
+  modelReady=false;$('plan-indicator').hidden=true;connectionControls(true);
+  try {
+    await connectionRequest('disconnect',{method:'POST'});
+    oauthWindow?.close();oauthWindow=null;chatgptAccount=null;
+    $('runtime-status').textContent='ChatGPT account disconnected.';
+    $('chatgpt-confirmation').hidden=true;
+    status('Account disconnected. Your session notes remain here.');
+  } catch(error) {status(error.message,'error');}
+  finally {connectionControls(false);updateControls();await checkChatGPT();}
+}
 
 function status(text,state='idle') { $('status').textContent=text; document.querySelector('.session-status').dataset.state=state; }
 function showWords(text) { $('spoken').hidden=false; $('spoken-text').textContent=text; }
@@ -50,6 +148,7 @@ function openDialog(id,{halt=true}={}) {
   if(halt && entered)pauseSession();
   lastFocus=document.activeElement;
   const d=$(id); if(!d.open)d.showModal();
+  if(id==='setup')void checkChatGPT();
 }
 function closeDialog(d) { d.close(); lastFocus?.focus?.(); }
 
@@ -82,14 +181,18 @@ async function loadModel(provider) {
   if(loading)return;
   pauseSession('Preparing your conversation…');
   loading=true; modelReady=false;
-  $('use-browser').disabled=true; $('use-local').disabled=true; $('model-progress-bar').hidden=false;
+  $('plan-indicator').hidden=true;
+  $('use-browser').disabled=true; $('use-local').disabled=true; $('use-chatgpt').disabled=true; $('model-progress-bar').hidden=false;
   updateControls();
   try {
-    await model.initialize({provider,onProgress:({text,progress})=>{
+    await model.initialize({provider,model:provider==='chatgpt'?$('chatgpt-model').value:undefined,onProgress:({text,progress})=>{
       $('model-progress').textContent=text; $('model-progress-bar').value=progress;
     }});
     modelReady=true;
-    $('runtime-status').textContent=`${provider==='browser'?'Browser model':'Local model'} · ${model.modelId} · ready`;
+    const runtime=provider==='chatgpt'?'Using ChatGPT plan':provider==='browser'?'Browser model':'Local model';
+    $('runtime-status').textContent=`${runtime} · ${model.modelId} · ready`;
+    $('plan-indicator').hidden=provider!=='chatgpt';
+    $('plan-indicator').textContent=`Using ChatGPT plan · ${model.account?.label||model.account?.email||model.modelId}`;
     $('enter-label').textContent='SPEAK TO ENTER';
     if($('setup').open)closeDialog($('setup'));
     status('Your guide is ready. Speak to enter, or send your words.');
@@ -97,9 +200,10 @@ async function loadModel(provider) {
   } catch(error) {
     const message=error.name==='AbortError'?'Model loading stopped. You can try again.':error.message;
     $('model-progress').textContent=message; status(message,'error');
+    $('usage-recovery').hidden=error.code!=='subscription_sharing_usage_limit_exceeded';
     $('runtime-status').textContent='Conversation model is not ready.';
   } finally {
-    loading=false; $('use-browser').disabled=false; $('use-local').disabled=false;
+    loading=false; $('use-browser').disabled=false; $('use-local').disabled=false; $('use-chatgpt').disabled=connectionBusy||!$('chatgpt-model').value;
     $('model-progress-bar').hidden=true; updateControls();
   }
 }
@@ -180,6 +284,10 @@ async function submit(input,{fromVoice=false}={}) {
     voiceEnabled=false; voice.pause();
     status(error.message||'The guide could not answer. Your words remain in the conversation.','error');
     showWords('Your words are still here. You can retry when you are ready.');
+    if(error.code==='subscription_sharing_usage_limit_exceeded') {
+      $('usage-recovery').hidden=false;$('model-progress').textContent=error.message;openDialog('setup',{halt:false});
+    }
+    if(model.provider==='chatgpt'&&[401,403,409].includes(error.status)) {modelReady=false;$('plan-indicator').hidden=true;$('runtime-status').textContent='Review your ChatGPT connection before continuing.';}
     if(model.state==='error') {modelReady=false;$('runtime-status').textContent='The model needs to be reloaded in settings.';}
   } finally {
     if(activeTurn?.current===current)activeTurn=null;
@@ -253,6 +361,16 @@ $('composer').addEventListener('submit',event=>{event.preventDefault();submit($(
 $('intention').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();$('composer').requestSubmit();}});
 $('use-browser').addEventListener('click',()=>loadModel('browser'));
 $('use-local').addEventListener('click',()=>loadModel('local'));
+$('use-chatgpt').addEventListener('click',()=>loadModel('chatgpt'));
+$('connect-chatgpt').addEventListener('click',connectChatGPT);
+$('check-chatgpt').addEventListener('click',()=>checkChatGPT({confirmed:true}));
+$('disconnect-chatgpt').addEventListener('click',disconnectChatGPT);
+$('chatgpt-model').addEventListener('change',()=>connectionControls(connectionBusy));
+$('dismiss-connection').addEventListener('click',()=>{
+  $('chatgpt-confirmation').hidden=true;
+  try {localStorage.setItem('dream-unity-plan-confirmed','yes');}catch{}
+});
+$('plan-indicator').addEventListener('click',()=>openDialog('setup'));
 $('explore-only').addEventListener('click',()=>{closeDialog($('setup'));beginExperience();status('Explore by writing “go to Dream Machine”, or open your constellation.');});
 $('settings-open').addEventListener('click',()=>openDialog('settings'));
 $('change-model').addEventListener('click',()=>{closeDialog($('settings'));openDialog('setup');});
@@ -297,3 +415,21 @@ for(const dialog of document.querySelectorAll('dialog')) {
 }
 document.addEventListener('visibilitychange',()=>{if(document.hidden&&entered)pauseSession('Paused while this page is away. Resume when ready.');});
 window.addEventListener('pagehide',event=>{pauseSession();if(!event.persisted){voice.dispose();model.dispose();scene.dispose();}});
+window.addEventListener('message',event=>{
+  if(event.origin!==pageLocation?.origin||event.source!==oauthWindow||event.data?.type!=='dream-unity-chatgpt-return')return;
+  const succeeded=event.data.result==='connected';
+  if(!succeeded)$('model-progress').textContent='Sign-in did not complete. You can try again; your conversation remains here.';
+  void checkChatGPT({confirmed:succeeded});
+});
+if(pageLocation) {
+  const returned=new URL(pageLocation.href).searchParams.get('chatgpt');
+  if(returned) {
+    if(window.opener) {
+      window.opener.postMessage({type:'dream-unity-chatgpt-return',result:returned==='connected'?'connected':'error'},pageLocation.origin);
+      window.close();
+    }
+    window.history.replaceState(null,'',pageLocation.pathname);
+    openDialog('setup');
+    if(returned==='error')$('model-progress').textContent='Sign-in did not complete. Your original Nexus window and notes remain open. You can try again.';
+  }
+}

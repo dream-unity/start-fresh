@@ -205,3 +205,134 @@ test('complete plain text from a provider is rejected rather than receiving inve
     assert.equal(tokens.length, 0);
   } finally { model.dispose(); }
 });
+
+function chatGPTFixture({ connected = true, sharing = true, selectedModel = 'account-model-b', models, chat } = {}) {
+  const requests = [];
+  const fixture = {
+    status: { connected, sharing, account: connected ? { id: 'account-a', label: 'Test account', selectedModel } : null, accounts: [] },
+    models: models || [{ slug: 'account-model-a', display_name: 'Account model A' }, { slug: 'account-model-b', display_name: 'Account model B' }],
+    requests,
+  };
+  fixture.model = new ConversationModel({ fetchImpl: async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    const body = options.body ? JSON.parse(options.body) : null;
+    requests.push({ path, options, body });
+    if (path.endsWith('/chatgpt/status')) return Response.json(fixture.status);
+    if (path.endsWith('/chatgpt/models')) return Response.json({ models: fixture.models });
+    if (path.endsWith('/chatgpt/model')) return Response.json({ selectedModel: body.model });
+    if (path.endsWith('/chatgpt/chat')) {
+      if (chat) return chat(url, options);
+      const generated = JSON.stringify({ reply: 'What possibility would you like to explore?', region: 'machine', focus: 'Possibility', memory: null });
+      return new Response(JSON.stringify({ message: { content: generated }, done: false }) + '\n{"done":true}\n');
+    }
+    throw new Error('Unexpected fallback request: ' + path);
+  } });
+  return fixture;
+}
+
+test('ChatGPT initialization validates its account catalog and explicitly selects the requested model', async () => {
+  const fixture = chatGPTFixture();
+  const { model, requests } = fixture;
+  try {
+    await model.initialize({ provider: 'chatgpt', model: 'account-model-a' });
+    assert.equal(model.state, 'ready');
+    assert.equal(model.modelId, 'account-model-a');
+    assert.equal(model.account.id, 'account-a');
+    assert.equal(model.account.selectedModel, 'account-model-a');
+    assert.equal(requests.length, 3);
+    assert.deepEqual(requests[2].body, { model: 'account-model-a' });
+    assert.equal(requests[2].options.headers['X-Dream-Unity-Account'], 'account-a');
+    const result = await model.reply({ messages: userMessages });
+    assert.equal(parseReply(result.text).intent.region, 'machine');
+    assert.deepEqual(Object.keys(requests[3].body).sort(), ['messages', 'model']);
+    assert.equal(requests[3].body.model, 'account-model-a');
+    assert.equal(requests[3].options.credentials, 'same-origin');
+    assert.equal(requests[3].options.headers.Authorization, undefined);
+    assert.equal(requests[3].options.headers['X-Dream-Unity-Account'], 'account-a');
+    assert.ok(requests.every(request => request.path.includes('/chatgpt/')));
+  } finally { model.dispose(); }
+});
+
+test('ChatGPT chooses an available saved preference or the first live catalog entry', async () => {
+  for (const [selectedModel, expected] of [['account-model-b', 'account-model-b'], ['old-unavailable-model', 'account-model-a']]) {
+    const fixture = chatGPTFixture({ selectedModel });
+    try {
+      await fixture.model.initialize({ provider: 'chatgpt' });
+      assert.equal(fixture.model.modelId, expected);
+    } finally { fixture.model.dispose(); }
+  }
+});
+
+test('ChatGPT requires sign-in and plan-sharing permission before requesting a catalog', async () => {
+  for (const [settings, code, status] of [
+    [{ connected: false }, 'CHATGPT_SIGN_IN_REQUIRED', 401],
+    [{ sharing: false }, 'CHATGPT_SHARING_REQUIRED', 403],
+  ]) {
+    const fixture = chatGPTFixture(settings);
+    try {
+      await assert.rejects(fixture.model.initialize({ provider: 'chatgpt' }), { code, status });
+      assert.equal(fixture.requests.length, 1);
+      assert.equal(fixture.model.provider, 'chatgpt');
+      assert.equal(fixture.model.state, 'error');
+    } finally { fixture.model.dispose(); }
+  }
+});
+
+test('ChatGPT never substitutes a different model for an unavailable explicit selection', async () => {
+  const fixture = chatGPTFixture();
+  try {
+    await assert.rejects(fixture.model.initialize({ provider: 'chatgpt', model: 'unavailable-explicit-model' }), { code: 'CHATGPT_MODEL_UNAVAILABLE', status: 400 });
+    assert.equal(fixture.requests.length, 2);
+    assert.equal(fixture.model.modelId, null);
+    assert.equal(fixture.model.provider, 'chatgpt');
+  } finally { fixture.model.dispose(); }
+});
+
+test('ChatGPT refreshes the account and catalog when initialized again after an account switch', async () => {
+  const fixture = chatGPTFixture();
+  try {
+    await fixture.model.initialize({ provider: 'chatgpt' });
+    fixture.status.account = { id: 'account-b', selectedModel: 'different-account-model' };
+    fixture.models = [{ slug: 'different-account-model', display_name: 'Different account model' }];
+    await fixture.model.initialize({ provider: 'chatgpt' });
+    assert.equal(fixture.model.account.id, 'account-b');
+    assert.equal(fixture.model.modelId, 'different-account-model');
+    assert.equal(fixture.requests.length, 6);
+    assert.equal(fixture.requests[5].options.headers['X-Dream-Unity-Account'], 'account-b');
+  } finally { fixture.model.dispose(); }
+});
+
+test('a ChatGPT usage failure after generated deltas never returns a completed answer', async () => {
+  const fixture = chatGPTFixture({ chat: async () => new Response([
+    JSON.stringify({ message: { content: '{"reply":"A partial answer' }, done: false }),
+    JSON.stringify({ error: 'Plan usage is unavailable', code: 'subscription_sharing_usage_limit_exceeded', status: 429 }),
+  ].join('\n') + '\n') });
+  try {
+    await fixture.model.initialize({ provider: 'chatgpt' });
+    const tokens = [];
+    await assert.rejects(fixture.model.reply({ messages: userMessages, onToken: token => tokens.push(token) }), error => {
+      assert.equal(error.code, 'subscription_sharing_usage_limit_exceeded');
+      assert.equal(error.status, 429);
+      assert.match(error.message, /settings → Usage/);
+      assert.doesNotMatch(error.message, /sign in again/i);
+      return true;
+    });
+    assert.equal(tokens.join(''), 'A partial answer');
+    assert.equal(fixture.requests.filter(request => request.path.endsWith('/chatgpt/chat')).length, 1);
+    assert.equal(fixture.model.provider, 'chatgpt');
+  } finally { fixture.model.dispose(); }
+});
+
+test('ChatGPT admission failures preserve safe code/status and do not trigger automatic reconnection', async () => {
+  const fixture = chatGPTFixture({ chat: async () => Response.json({ error: 'Temporarily unavailable', code: 'subscription_sharing_usage_unavailable' }, { status: 503 }) });
+  try {
+    await fixture.model.initialize({ provider: 'chatgpt' });
+    await assert.rejects(fixture.model.reply({ messages: userMessages }), error => {
+      assert.equal(error.status, 503);
+      assert.equal(error.code, 'subscription_sharing_usage_unavailable');
+      assert.match(error.message, /sign-in is preserved/);
+      return true;
+    });
+    assert.equal(fixture.requests.length, 4);
+  } finally { fixture.model.dispose(); }
+});

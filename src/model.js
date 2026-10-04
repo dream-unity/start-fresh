@@ -22,7 +22,7 @@ Select a region for the LATEST user intention, not the previous turn. Exploring 
 
 Return ONLY one JSON object with exactly these fields:
 {"reply":"Your concise natural-language answer","region":"machine|maker|world|unity","focus":"A short phrase under 60 characters","memory":null}
-The reply is spoken dialogue; never include JSON instructions, navigation tags or markdown fences inside it. memory should normally be null. If the user explicitly expressed a useful goal, insight, tension or project, you may propose {"kind":"goal|insight|tension|project","text":"Their own concise meaning"}. A proposal is not saved until the person separately accepts it. Never claim it has been saved or infer sensitive facts. Choose actual enum values, never a string containing vertical bars.`;
+The reply is spoken dialogue; never include JSON instructions, navigation tags or markdown fences inside it. memory should normally be null. If the user explicitly expressed a useful goal, insight, tension, project or action, you may propose {"kind":"goal|insight|tension|project|action","text":"Their own concise meaning"}. An action is a next step the person chose, not a claim that it is completed. A proposal is not saved until the person separately accepts it. Never claim it has been saved or infer sensitive facts. Choose actual enum values, never a string containing vertical bars.`;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -32,6 +32,27 @@ const MAX_REPLY_CHARACTERS = 16000;
 
 function error(message, code) {
   return Object.assign(new Error(message), { code });
+}
+
+const CHATGPT_RECOVERY = {
+  CHATGPT_SIGN_IN_REQUIRED: [401, 'Continue with ChatGPT to sign in before starting a conversation.'],
+  CHATGPT_SHARING_REQUIRED: [403, 'Enable ChatGPT plan usage when signing in, then connect again.'],
+  subscription_sharing_usage_limit_exceeded: [429, 'ChatGPT plan usage for this app has reached a limit. Check ChatGPT settings → Usage before continuing.'],
+  subscription_sharing_usage_unavailable: [503, 'ChatGPT could not check your plan usage. Your sign-in is preserved; try again later.'],
+  subscription_sharing_user_not_eligible: [403, 'ChatGPT plan usage is unavailable for this account or workspace. Check the selected account and its policy.'],
+  subscription_sharing_invalid_user: [401, 'ChatGPT could not validate this account. Check the selected account and sign-in permission.'],
+};
+
+function responseError(body, { message, code, status = 502, chatgpt = false }) {
+  const source = body?.error && typeof body.error === 'object' ? body.error : body;
+  const candidateCode = body?.code || source?.code;
+  const safeCode = typeof candidateCode === 'string' && /^[A-Za-z0-9_.-]{1,120}$/.test(candidateCode) ? candidateCode : code;
+  const known = chatgpt ? CHATGPT_RECOVERY[safeCode] : null;
+  const candidateMessage = typeof body?.error === 'string' ? body.error : source?.message;
+  const detail = typeof candidateMessage === 'string' ? candidateMessage.replace(/[\u0000-\u001f]/g, ' ').slice(0, 1000) : message;
+  const candidateStatus = body?.status ?? source?.status;
+  const safeStatus = Number.isInteger(candidateStatus) && candidateStatus >= 400 && candidateStatus <= 599 ? candidateStatus : known?.[0] || status;
+  return Object.assign(error(known?.[1] || detail || message, safeCode), { status: safeStatus });
 }
 
 function abortError() {
@@ -111,6 +132,8 @@ export class ConversationModel {
     this.localBaseURL = localBaseURL;
     this.provider = null;
     this.modelId = null;
+    this.account = null;
+    this.models = [];
     this.state = 'idle';
     this.engine = null;
     this.worker = null;
@@ -120,14 +143,19 @@ export class ConversationModel {
     this.failure = null;
   }
 
-  async initialize({ provider = 'browser', onProgress = () => {} } = {}) {
-    if (!['browser', 'local'].includes(provider)) throw error('Choose browser AI or local AI.', 'INVALID_PROVIDER');
+  async initialize({ provider = 'browser', model: requestedModel, onProgress = () => {} } = {}) {
+    if (!['browser', 'local', 'chatgpt'].includes(provider)) throw error('Choose ChatGPT, browser AI or local AI.', 'INVALID_PROVIDER');
     if (this.state === 'disposed') throw error('This conversation has been closed.', 'DISPOSED');
-    if (this.state === 'ready' && this.provider === provider) return this;
+    // ChatGPT initialization always checks the current account and catalog. An
+    // account switch must never reuse a previously selected account's model.
+    if (this.state === 'ready' && this.provider === provider && provider !== 'chatgpt') return this;
     if (this.loading || this.active) throw error('Stop the current operation before changing the model.', 'MODEL_BUSY');
     this.destroyWorker();
     this.engine = null;
     this.provider = provider;
+    this.modelId = null;
+    this.account = null;
+    this.models = [];
     this.state = 'loading';
     this.failure = null;
     const operation = { controller: new AbortController(), fail: null };
@@ -138,7 +166,7 @@ export class ConversationModel {
       if (this.loading !== operation || signal.aborted) return;
       clearTimeout(stalled);
       stalled = setTimeout(() => {
-        this.failure = error('The model download stopped responding. Check the connection and try again.', 'MODEL_LOAD_TIMEOUT');
+        this.failure = error(provider === 'browser' ? 'The model download stopped responding. Check the connection and try again.' : 'The conversation connection stopped responding. Check the project server and try again.', 'MODEL_LOAD_TIMEOUT');
         operation.controller.abort();
         this.destroyWorker();
       }, 180000);
@@ -162,6 +190,51 @@ export class ConversationModel {
         this.engine = new webllm.WebWorkerMLCEngine(worker, { initProgressCallback: progress, logLevel: 'ERROR' });
         progress({ progress: 0, text: 'Downloading the conversation model. It will be cached on this device…' });
         await abortable(this.engine.reload(this.modelId, { context_window_size: 4096 }), signal);
+      } else if (provider === 'chatgpt') {
+        progress({ progress: 0, text: 'Checking your ChatGPT connection…' });
+        const read = async path => {
+          const response = await this.fetch(new URL(path, this.localBaseURL), { signal, credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' } });
+          let body;
+          try { body = await response.json(); } catch { /* Static hosts cannot run the local ChatGPT connection. */ }
+          if (!response.ok) throw responseError(body, {
+            chatgpt: true, status: response.status, code: 'CHATGPT_CONNECTION_UNAVAILABLE',
+            message: 'The ChatGPT connection needs the running project server. Start the app locally, then continue with ChatGPT.',
+          });
+          if (!body || typeof body !== 'object' || Array.isArray(body)) throw responseError(null, { chatgpt: true, code: 'CHATGPT_CONNECTION_UNAVAILABLE', message: 'The project server returned an invalid ChatGPT connection status.' });
+          return body;
+        };
+        const status = await read('chatgpt/status');
+        checkAbort(signal);
+        if (status.connected !== true || !status.account || typeof status.account.id !== 'string' || !status.account.id) {
+          throw responseError(null, { chatgpt: true, code: 'CHATGPT_SIGN_IN_REQUIRED', message: 'Continue with ChatGPT to sign in.' });
+        }
+        if (status.sharing !== true) throw responseError(null, { chatgpt: true, code: 'CHATGPT_SHARING_REQUIRED', message: 'Enable ChatGPT plan usage to continue.' });
+        progress({ progress: 0.5, text: 'Loading the models available to your ChatGPT account…' });
+        const catalog = await read('chatgpt/models');
+        checkAbort(signal);
+        const seen = new Set();
+        const models = (Array.isArray(catalog.models) ? catalog.models : []).filter(item => {
+          if (!item || typeof item.slug !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,199}$/.test(item.slug) || seen.has(item.slug)) return false;
+          seen.add(item.slug); return true;
+        }).map(item => ({ slug: item.slug, display_name: typeof item.display_name === 'string' ? item.display_name.slice(0, 160) : item.slug }));
+        if (!models.length) throw responseError(null, { chatgpt: true, code: 'CHATGPT_MODEL_UNAVAILABLE', message: 'No conversation models are available to this ChatGPT account. Check the selected account and its policy.' });
+        const chosen = requestedModel === undefined ? (seen.has(status.account.selectedModel) ? status.account.selectedModel : models[0].slug) : requestedModel;
+        if (typeof chosen !== 'string' || !seen.has(chosen)) throw responseError(null, { chatgpt: true, status: 400, code: 'CHATGPT_MODEL_UNAVAILABLE', message: 'The selected model is not available to this ChatGPT account. Choose a model from its current list.' });
+        const selection = await this.fetch(new URL('chatgpt/model', this.localBaseURL), {
+          method: 'POST', signal, credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Dream-Unity-Account': status.account.id },
+          body: JSON.stringify({ model: chosen }),
+        });
+        if (!selection.ok) {
+          let detail;
+          try { detail = await selection.json(); } catch { /* Keep the safe fallback below. */ }
+          throw responseError(detail, { chatgpt: true, status: selection.status, code: 'CHATGPT_MODEL_UNAVAILABLE', message: 'The model selection could not be confirmed. Check your ChatGPT connection and choose again.' });
+        }
+        checkAbort(signal);
+        this.modelId = chosen;
+        this.models = models;
+        this.account = Object.fromEntries(['id', 'label', 'email', 'name'].filter(key => typeof status.account[key] === 'string').map(key => [key, status.account[key].slice(0, 320)]));
+        this.account.selectedModel = chosen;
       } else {
         progress({ progress: 0, text: 'Connecting to the local conversation server…' });
         const response = await this.fetch(new URL('health', this.localBaseURL), { signal, cache: 'no-store', headers: { Accept: 'application/json' } });
@@ -182,6 +255,7 @@ export class ConversationModel {
       if (this.failure) throw this.failure;
       if (signal.aborted) throw abortError();
       if (cause?.code) throw cause;
+      if (provider === 'chatgpt') throw responseError(null, { chatgpt: true, status: 503, code: 'CHATGPT_CONNECTION_FAILED', message: 'Could not reach the ChatGPT connection. Check the project server and network, then try again. Your sign-in has not been changed.' });
       throw error('The model could not load. Check available device memory and the network connection, then retry or use local AI. ' + String(cause?.message || cause).slice(0,240), 'MODEL_LOAD_FAILED');
     } finally {
       clearTimeout(stalled);
@@ -274,6 +348,7 @@ export class ConversationModel {
       if (operation.callbackError) throw operation.callbackError;
       if (this.failure) throw this.failure;
       if (operation.controller.signal.aborted) throw abortError();
+      if (this.provider === 'chatgpt' && !cause?.code) throw responseError(null, { chatgpt: true, status: 503, code: 'CHATGPT_CONNECTION_FAILED', message: 'The ChatGPT connection was interrupted. Your sign-in is preserved; try again when ready.' });
       throw cause instanceof Error ? cause : error(String(cause), 'GENERATION_FAILED');
     } finally {
       clearTimeout(stalled);
@@ -283,16 +358,20 @@ export class ConversationModel {
   }
 
   async replyLocal(messages, signal, receive) {
-    const response = await this.fetch(new URL('chat', this.localBaseURL), {
-      method: 'POST', signal, headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
-      body: JSON.stringify({ messages }),
+    const chatgpt = this.provider === 'chatgpt';
+    const name = chatgpt ? 'ChatGPT' : 'The local model';
+    const prefix = chatgpt ? 'CHATGPT' : 'LOCAL';
+    if (chatgpt && !this.account?.id) throw responseError(null, { chatgpt: true, code: 'CHATGPT_SIGN_IN_REQUIRED', message: 'Reconnect your ChatGPT account before continuing.' });
+    const response = await this.fetch(new URL(chatgpt ? 'chatgpt/chat' : 'chat', this.localBaseURL), {
+      method: 'POST', signal, credentials: 'same-origin', headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson', ...(chatgpt && { 'X-Dream-Unity-Account': this.account.id }) },
+      body: JSON.stringify(chatgpt ? { messages, model: this.modelId } : { messages }),
     });
     if (!response.ok) {
-      let detail = '';
-      try { const body = await response.json(); detail = typeof body.error === 'string' ? body.error : ''; } catch { /* status is enough */ }
-      throw error(detail || 'The local model could not answer. Check that Ollama and the project server are running.', 'LOCAL_REPLY_FAILED');
+      let body;
+      try { body = await response.json(); } catch { /* status is enough */ }
+      throw responseError(body, { chatgpt, status: response.status, code: `${prefix}_REPLY_FAILED`, message: chatgpt ? 'ChatGPT could not answer. Check the connection and try again.' : 'The local model could not answer. Check that Ollama and the project server are running.' });
     }
-    if (!response.body) throw error('The local server did not return a response stream.', 'LOCAL_STREAM_MISSING');
+    if (!response.body) throw error(`${name} did not return a response stream.`, `${prefix}_STREAM_MISSING`);
     const reader = response.body.getReader();
     const utf8 = new TextDecoder();
     let buffered = '';
@@ -300,9 +379,9 @@ export class ConversationModel {
     const consume = line => {
       if (!line.trim()) return;
       let item;
-      try { item = JSON.parse(line); } catch { throw error('The local server returned an unreadable response.', 'LOCAL_INVALID_STREAM'); }
-      if (!item || typeof item !== 'object' || Array.isArray(item)) throw error('The local server returned an unreadable response.', 'LOCAL_INVALID_STREAM');
-      if (item.error) throw error(String(item.error), 'LOCAL_REPLY_FAILED');
+      try { item = JSON.parse(line); } catch { throw error(`${name} returned an unreadable response.`, `${prefix}_INVALID_STREAM`); }
+      if (!item || typeof item !== 'object' || Array.isArray(item)) throw error(`${name} returned an unreadable response.`, `${prefix}_INVALID_STREAM`);
+      if (item.error) throw responseError(item, { chatgpt, code: `${prefix}_REPLY_FAILED`, message: `${name} could not complete the answer.` });
       if (typeof item.message?.content === 'string') receive(item.message.content);
       if (item.done === true) complete = true;
     };
@@ -311,7 +390,7 @@ export class ConversationModel {
         checkAbort(signal);
         const { value, done } = await reader.read();
         buffered += done ? utf8.decode() : utf8.decode(value, { stream: true });
-        if (buffered.length > 131072) throw error('The local response exceeded its message limit.', 'LOCAL_INVALID_STREAM');
+        if (buffered.length > 131072) throw error(`${name} exceeded its message limit.`, `${prefix}_INVALID_STREAM`);
         let newline;
         while ((newline = buffered.indexOf('\n')) >= 0) {
           consume(buffered.slice(0, newline));
@@ -321,7 +400,7 @@ export class ConversationModel {
         if (done) { if (buffered.trim()) consume(buffered); break; }
       }
       checkAbort(signal);
-      if (!complete) throw error('The local model disconnected before finishing. Please try again.', 'LOCAL_STREAM_INTERRUPTED');
+      if (!complete) throw error(`${name} disconnected before finishing. Please try again.`, `${prefix}_STREAM_INTERRUPTED`);
     } finally {
       await reader.cancel().catch(() => {});
       reader.releaseLock();

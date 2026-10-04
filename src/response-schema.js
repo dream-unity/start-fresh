@@ -1,4 +1,4 @@
-// Shared by the browser runtime and the loopback Ollama server. The server owns
+// Shared by ChatGPT, browser inference and the local Ollama server. The server owns
 // this schema; a client cannot weaken it through a request field.
 export const RESPONSE_SCHEMA = {
   type: 'object',
@@ -12,7 +12,7 @@ export const RESPONSE_SCHEMA = {
         {
           type: 'object',
           properties: {
-            kind: { type: 'string', enum: ['goal', 'insight', 'tension', 'project'] },
+            kind: { type: 'string', enum: ['goal', 'insight', 'tension', 'project', 'action'] },
             text: { type: 'string', minLength: 1, maxLength: 300 },
           },
           required: ['kind', 'text'],

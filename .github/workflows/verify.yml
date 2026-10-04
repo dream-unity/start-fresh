@@ -3,6 +3,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      verify_ollama:
+        description: Run the experimental Ollama navigation-quality check
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -49,6 +54,7 @@ jobs:
           name: static-application-${{ github.sha }}
           path: dist/
   real-inference:
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_ollama
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

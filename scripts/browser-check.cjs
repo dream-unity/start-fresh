@@ -1,6 +1,6 @@
 /* Deterministic application acceptance. Speech and model replies are MOCKED.
- * This verifies integration and UI lifecycle, not hardware or real inference.
- * Run test:inference separately for the unmocked local model path.
+ * This verifies integration and UI lifecycle, not hardware, live OAuth consent,
+ * subscription eligibility, or real inference.
  */
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -93,20 +93,41 @@ function ndjson(text, region = 'unity', memory = null) {
   return pieces.map(content => JSON.stringify({ message: { role: 'assistant', content }, done: false })).join('\n') + '\n' + JSON.stringify({ done: true }) + '\n';
 }
 
-async function mockModel(page) {
+async function mockModel(page, { connected = true } = {}) {
   const requests = [];
   let pendingRelease = null;
   let heldResolve;
   const held = new Promise(resolve => { heldResolve = resolve; });
-  await page.route('**/api/health', route => route.fulfill({
+  await page.route('**/api/chatgpt/status', route => route.fulfill({
     status: 200, contentType: 'application/json',
-    body: JSON.stringify({ ok: true, ready: true, provider: 'local', model: 'acceptance-fixture-not-a-real-model' }),
+    body: JSON.stringify({
+      connected, sharing: connected,
+      account: connected ? { id: 'fixture', label: 'Fixture account', selectedModel: 'fixture-gpt' } : null,
+      accounts: [],
+    }),
   }));
-  await page.route('**/api/chat', async route => {
+  await page.route('**/api/chatgpt/models', route => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ models: connected ? [{ slug: 'fixture-gpt', display_name: 'Fixture GPT' }] : [] }),
+  }));
+  await page.route('**/api/chatgpt/model', async route => {
+    assert.equal(route.request().method(), 'POST');
+    assert.equal(connected, true);
+    assert.equal(route.request().headers()['x-dream-unity-account'], 'fixture', 'Model selection must be bound to the displayed account.');
+    assert.match(route.request().headers()['content-type'] || '', /^application\/json(?:;|$)/);
+    assert.deepEqual(route.request().postDataJSON(), { model: 'fixture-gpt' });
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, model: 'fixture-gpt' }) });
+  });
+  await page.route('**/api/chatgpt/chat', async route => {
+    assert.equal(route.request().method(), 'POST');
+    assert.equal(route.request().headers()['x-dream-unity-account'], 'fixture', 'A conversation must stay bound to the selected account.');
+    assert.match(route.request().headers()['content-type'] || '', /^application\/json(?:;|$)/);
     const body = route.request().postDataJSON();
     requests.push(body);
     // Keep this strict: the real server rejects extra request keys.
-    assert.deepEqual(Object.keys(body), ['messages'], 'Client/server request schema must agree.');
+    assert.deepEqual(Object.keys(body).sort(), ['messages', 'model'], 'Client/server request schema must agree.');
+    assert.equal(body.model, 'fixture-gpt', 'Inference must use the selected account model.');
+    assert.equal(connected, true, 'Inference must require an authorized subscription connection.');
     const input = body.messages.filter(message => message.role === 'user').at(-1)?.content || '';
     let response;
     if (input.includes('WAIT_FOR_CANCEL')) {
@@ -126,7 +147,7 @@ async function mockModel(page) {
       if (!input.includes('WAIT_FOR_CANCEL')) throw error;
     });
   });
-  return { requests, held, release: () => pendingRelease?.() };
+  return { requests, held, authorize: () => { connected = true; }, release: () => pendingRelease?.() };
 }
 
 function watchErrors(page) {
@@ -154,12 +175,17 @@ async function ready(page) {
 async function connect(page) {
   await page.locator('#enter').click();
   await page.locator('#setup').waitFor({ state: 'visible' });
-  await page.locator('#use-local').click();
+  await page.locator('#use-chatgpt').waitFor({ state: 'visible' });
+  await page.waitForFunction(() => document.querySelector('#chatgpt-model')?.value === 'fixture-gpt'
+    && !document.querySelector('#use-chatgpt')?.disabled);
+  assert.equal(await page.locator('#chatgpt-model').inputValue(), 'fixture-gpt');
+  await page.locator('#use-chatgpt').click();
   await page.locator('#setup').waitFor({ state: 'hidden' });
   // Model initialization can be a long download. A fresh explicit activation
   // after it completes preserves the browser's microphone permission gesture.
   await page.locator('#enter').click();
   await page.locator('#spoken').waitFor({ state: 'visible' });
+  assert.match(await page.locator('#runtime-status').textContent(), /ChatGPT/i);
 }
 
 async function typeTurn(page, text, expectedRegion) {
@@ -218,7 +244,7 @@ async function main() {
 
   await typeTurn(page, 'WAIT_FOR_CANCEL');
   await model.held;
-  const cancelledRequest = page.waitForEvent('requestfailed', { predicate: request => request.url().endsWith('/api/chat') });
+  const cancelledRequest = page.waitForEvent('requestfailed', { predicate: request => request.url().endsWith('/api/chatgpt/chat') });
   await page.locator('#interrupt').click();
   await cancelledRequest;
   model.release();
@@ -252,6 +278,46 @@ async function main() {
   pass('Device persistence is opt-in; explicit reload restore and deletion work through the real UI');
   assert.deepEqual(errors, [], 'Desktop must have no local JavaScript or console errors.');
 
+  const unsignedContext = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: 'reduce' });
+  await speechFixture(unsignedContext);
+  const unsignedPage = await unsignedContext.newPage();
+  const unsignedErrors = watchErrors(unsignedPage);
+  const unsignedModel = await mockModel(unsignedPage, { connected: false });
+  const fixtureAuthorization = 'https://auth.openai.com/api/accounts/authorize?client_id=fixture-client&state=fixture-state';
+  let authorizationRequests = 0;
+  await unsignedContext.route('https://auth.openai.com/**', async route => {
+    assert.equal(route.request().url(), fixtureAuthorization, 'Only the expected mocked authorization destination may be opened.');
+    authorizationRequests++;
+    await route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>Mock authorization</title><p>MOCK AUTHORIZATION. No OpenAI account is contacted.</p>' });
+  });
+  await unsignedPage.route('**/api/chatgpt/auth/start', async route => {
+    assert.equal(route.request().method(), 'POST');
+    assert.match(route.request().headers()['content-type'] || '', /^application\/json(?:;|$)/);
+    assert.deepEqual(route.request().postDataJSON(), {}, 'Sign-in start must satisfy the local server JSON request contract.');
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ url: fixtureAuthorization }) });
+  });
+  await ready(unsignedPage);
+  await unsignedPage.locator('#enter').click();
+  await unsignedPage.locator('#connect-chatgpt').waitFor({ state: 'visible' });
+  assert.equal(await unsignedPage.locator('#use-chatgpt').isVisible(), false, 'Unsigned visitors cannot start subscription inference.');
+  const popupOpened = unsignedPage.waitForEvent('popup');
+  await unsignedPage.locator('#connect-chatgpt').click();
+  const popup = await popupOpened;
+  await popup.waitForURL(fixtureAuthorization);
+  await popup.getByText('MOCK AUTHORIZATION. No OpenAI account is contacted.', { exact: true }).waitFor();
+  assert.equal(authorizationRequests, 1);
+  assert.equal(unsignedModel.requests.length, 0, 'Opening authorization must not start inference.');
+  unsignedModel.authorize();
+  await popup.close();
+  await unsignedPage.locator('#check-chatgpt').click();
+  await unsignedPage.locator('#use-chatgpt').waitFor({ state: 'visible' });
+  await unsignedPage.locator('#use-chatgpt').click();
+  await unsignedPage.locator('#setup').waitFor({ state: 'hidden' });
+  await typeTurn(unsignedPage, 'Help me choose one action.', 'Dream Maker');
+  assert.equal(unsignedModel.requests.length, 1);
+  assert.deepEqual(unsignedErrors, [], 'Mocked sign-in and manual connection recheck must complete without errors.');
+  pass('Unsigned setup → mocked OpenAI authorization popup → explicit connection recheck → selected GPT conversation');
+
   const deniedContext = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: 'reduce' });
   await speechFixture(deniedContext, true);
   const deniedPage = await deniedContext.newPage();
@@ -282,9 +348,10 @@ async function main() {
 
   await fs.writeFile(path.join(output, 'browser-acceptance.json'), JSON.stringify({
     suite: 'Deterministic full-app acceptance',
-    model: 'MOCKED Ollama NDJSON responses', speech: 'MOCKED recognition and synthesis',
+    model: 'MOCKED ChatGPT subscription status, catalog and NDJSON responses', speech: 'MOCKED recognition and synthesis',
+    authorization: 'MOCKED OpenAI popup page; no external account contacted',
     renderer: 'Real Chromium WebGL via SwiftShader',
-    limitations: ['Does not validate physical microphone capture.', 'Does not validate a real model response; use the separate inference smoke test.'],
+    limitations: ['Does not validate physical microphone capture.', 'Does not validate live OAuth consent, subscription eligibility, or an actual GPT response.', 'The separate Ollama inference test exercises an optional fallback, not subscription inference.'],
     checks, modelRequests: model.requests.length, passed: true,
   }, null, 2));
 }
