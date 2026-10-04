@@ -6,7 +6,7 @@ const REGIONS = {
   unity: { color: 0x9dcfff, position: [0, 0.4, 0] },
   machine: { color: 0x4fc8ff, position: [-6.3, 1.4, -3.6] },
   maker: { color: 0x70e8b5, position: [6.1, 0.9, -3.2] },
-  world: { color: 0xb39bff, position: [0.4, 4.2, -6.2] },
+  world: { color: 0xb39bff, position: [0.4, -2.8, -5.3] },
 };
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -71,7 +71,6 @@ export function createScene(canvas, { onReady, onRegion } = {}) {
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   const mobile = window.matchMedia('(max-width: 680px)');
   let motion = !reducedMotion.matches;
-  let requestedMotion = true;
   let disposed = false;
   let contextLost = false;
   let frame = 0;
@@ -88,6 +87,7 @@ export function createScene(canvas, { onReady, onRegion } = {}) {
   const targetCamera = new THREE.Vector3();
   const cameraLook = new THREE.Vector3(0, 0, 0);
   const targetLook = new THREE.Vector3(0, 0, 0);
+  const regionPositions = Object.fromEntries(Object.entries(REGIONS).map(([name, spec]) => [name, new THREE.Vector3(...spec.position)]));
   const group = new THREE.Group();
   scene.add(group);
 
@@ -161,12 +161,18 @@ export function createScene(canvas, { onReady, onRegion } = {}) {
   const nexus = new THREE.Group();
   nexus.position.fromArray(REGIONS.unity.position);
   group.add(nexus);
-  const centralCrystal = makeCrystal(0.83, 2.66, 0x789edb, nexus, 4, 0.75);
+  const centralCrystal = makeCrystal(0.91, 2.93, 0x92b9ed, nexus, 4, 0.75);
+  centralCrystal.material.metalness = 0.2;
+  centralCrystal.material.roughness = 0.12;
+  centralCrystal.material.opacity = 0.76;
+  centralCrystal.children[0].material.color.setHex(0xbdeaff);
   centralCrystal.rotation.set(0.03, Math.PI / 9, 0.07);
   const innerCrystal = makeCrystal(0.25, 1.46, 0xb9e2ff, nexus, 4, 0.25);
   innerCrystal.rotation.y = Math.PI / 4;
-  const coreGlow = makeGlow(0x79baff, 3.8, 0.46, nexus);
-  coreGlow.position.z = -0.2;
+  const coreGlow = makeGlow(0x529dff, 5.3, 0.7, nexus);
+  coreGlow.position.z = -0.45;
+  const innerGlow = makeGlow(0xb4f1ff, 1.55, 0.37, nexus);
+  innerGlow.position.set(0.02, 0.1, 0.74);
   const coreLight = new THREE.PointLight(0x86caff, 5, 13, 2);
   nexus.add(coreLight);
 
@@ -277,6 +283,20 @@ export function createScene(canvas, { onReady, onRegion } = {}) {
   })));
   scene.add(stars);
 
+  const dustPositions = [];
+  for (let i = 0; i < 88; i++) {
+    const angle = rnd() * Math.PI * 2;
+    const radius = 2.1 + rnd() * 8.1;
+    dustPositions.push(Math.cos(angle) * radius, Math.sin(angle) * radius * 0.51, -1.5 - rnd() * 7);
+  }
+  const dustGeometry = tracked(new THREE.BufferGeometry());
+  dustGeometry.setAttribute('position', new THREE.Float32BufferAttribute(dustPositions, 3));
+  const dust = new THREE.Points(dustGeometry, tracked(new THREE.PointsMaterial({
+    color: 0xb3d8ff, size: 0.055, map: glowTexture, transparent: true,
+    opacity: 0.72, blending: THREE.AdditiveBlending, depthWrite: false,
+  })));
+  group.add(dust);
+
   const memoryGroup = new THREE.Group();
   group.add(memoryGroup);
   let memoryResources = [];
@@ -331,13 +351,36 @@ export function createScene(canvas, { onReady, onRegion } = {}) {
     start();
   }
 
+  function updateLayout() {
+    const narrow = canvas.clientWidth / Math.max(canvas.clientHeight, 1) < 0.8;
+    regionPositions.machine.set(narrow ? -2.65 : -6.3, 1.4, -3.6);
+    regionPositions.maker.set(narrow ? 2.6 : 6.1, 0.9, -3.2);
+    regionPositions.world.set(narrow ? 0 : 0.4, narrow ? -3.05 : -2.8, -5.3);
+    for (const [name, item] of Object.entries(assemblies)) {
+      item.assembly.position.copy(regionPositions[name]);
+      // Position and uniformly scale regional sculptures, rather than flattening
+      // the entire world horizontally on a portrait display.
+      item.assembly.scale.setScalar(narrow ? 0.75 : name === 'world' ? 0.8 : 1);
+    }
+    for (const flow of flowPaths) {
+      const base = regionPositions[flow.name];
+      flow.path.v1.set(base.x * 0.3, base.y + 1.8, 1.4);
+      flow.path.v2.set(base.x * 0.8, base.y - 1.4, base.z + 1.6);
+      flow.path.v3.copy(base);
+      const oldGeometry = flow.thread.geometry;
+      flow.thread.geometry = tracked(new THREE.BufferGeometry().setFromPoints(flow.path.getPoints(80)));
+      resources.delete(oldGeometry);
+      oldGeometry.dispose();
+    }
+  }
+
   function updateCamera() {
     const narrow = canvas.clientWidth / Math.max(canvas.clientHeight, 1) < 0.8;
-    const position = REGIONS[region].position;
+    const position = regionPositions[region];
     const focus = region !== 'unity' && cameraFocus;
     const distance = narrow ? 25 : 18.4;
-    targetCamera.set(focus ? position[0] * 0.69 : 0, focus ? position[1] * 0.61 + 1.3 : 1.25, distance + (focus ? -3.7 : 0));
-    targetLook.set(focus ? position[0] * 0.82 : 0, focus ? position[1] * 0.7 : -0.15, focus ? position[2] * 0.4 : -1.6);
+    targetCamera.set(focus ? position.x * (narrow ? 0.25 : 0.69) : 0, focus ? position.y * 0.61 + 1.3 : 1.25, distance + (focus && !narrow ? -3.7 : 0));
+    targetLook.set(focus ? position.x * (narrow ? 0.36 : 0.82) : 0, focus ? position.y * 0.7 : -0.15, focus ? position.z * 0.4 : -1.6);
     if (!motion) { camera.position.copy(targetCamera); cameraLook.copy(targetLook); camera.lookAt(cameraLook); }
   }
 
@@ -348,12 +391,14 @@ export function createScene(canvas, { onReady, onRegion } = {}) {
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
+    updateLayout();
     updateCamera();
     start();
   }
 
   function setRegion(value, { focus = true } = {}) {
     region = normalizeRegion(value);
+    canvas.dataset.region = region;
     cameraFocus = focus;
     updateCamera();
     onRegion?.(region);
@@ -373,13 +418,15 @@ export function createScene(canvas, { onReady, onRegion } = {}) {
     centralCrystal.rotation.y = Math.PI / 9 + (motion ? elapsed * 0.055 : 0);
     centralCrystal.position.y = breath;
     innerCrystal.rotation.y = Math.PI / 4 - (motion ? elapsed * 0.07 : 0);
-    centralCrystal.material.emissiveIntensity = 0.09 + activity * 0.4;
-    coreGlow.material.opacity = 0.4 + activity * 0.3 + breath;
+    centralCrystal.material.emissiveIntensity = 0.16 + activity * 0.4;
+    coreGlow.material.opacity = 0.66 + activity * 0.3 + breath;
+    innerGlow.material.opacity = 0.36 + activity * 0.32 + breath;
     coreLight.intensity = 3.4 + activity * 4;
-    coreGlow.scale.setScalar(3.8 + activity * 0.7);
+    coreGlow.scale.setScalar(5.3 + activity * 0.7);
     halos[1].rotation.y = motion ? elapsed * 0.018 : 0;
     halos[2].rotation.z = -0.28 + (motion ? Math.sin(elapsed * 0.15) * 0.09 : 0);
     stars.rotation.z = motion ? Math.sin(elapsed * 0.03) * 0.006 : 0;
+    dust.rotation.z = motion ? Math.sin(elapsed * 0.08) * 0.025 : 0;
     for (const [name, item] of Object.entries(assemblies)) {
       const target = name === region ? 1 : region === 'unity' ? 0.23 : 0.04;
       item.intensity = motion ? item.intensity + (target - item.intensity) * smooth : target;
@@ -409,7 +456,6 @@ export function createScene(canvas, { onReady, onRegion } = {}) {
     if (document.hidden) { cancelAnimationFrame(frame); frame = 0; previousTime = 0; }
     else start();
   }
-  function motionPreference() { motion = requestedMotion && !reducedMotion.matches; updateCamera(); start(); }
   function loseContext(event) {
     event.preventDefault();
     contextLost = true;
@@ -429,13 +475,13 @@ export function createScene(canvas, { onReady, onRegion } = {}) {
   observer?.observe(canvas);
   window.addEventListener('resize', resize, { passive: true });
   document.addEventListener('visibilitychange', visibilityChange);
-  reducedMotion.addEventListener?.('change', motionPreference);
   canvas.addEventListener('webglcontextlost', loseContext);
   canvas.addEventListener('webglcontextrestored', restoreContext);
   resize();
   camera.position.copy(targetCamera);
   cameraLook.copy(targetLook);
   canvas.dataset.renderer = 'webgl';
+  canvas.dataset.region = region;
   onReady?.({ webgl: true });
   start();
 
@@ -445,7 +491,9 @@ export function createScene(canvas, { onReady, onRegion } = {}) {
     setSpeaking(value) { speaking = Boolean(value); start(); },
     setEnergy(value) { energy = Number.isFinite(value) ? clamp(value, 0, 1) : 0; start(); },
     setMemory,
-    setMotion(value) { requestedMotion = Boolean(value); motion = requestedMotion && !reducedMotion.matches; updateCamera(); start(); },
+    // The application owns the user's explicit preference and its control label.
+    // The initial OS preference is a default, not a permanent veto on Resume.
+    setMotion(value) { motion = Boolean(value); updateCamera(); start(); },
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -453,7 +501,6 @@ export function createScene(canvas, { onReady, onRegion } = {}) {
       observer?.disconnect();
       window.removeEventListener('resize', resize);
       document.removeEventListener('visibilitychange', visibilityChange);
-      reducedMotion.removeEventListener?.('change', motionPreference);
       canvas.removeEventListener('webglcontextlost', loseContext);
       canvas.removeEventListener('webglcontextrestored', restoreContext);
       memoryResources.forEach(item => item.dispose());

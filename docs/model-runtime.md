@@ -23,7 +23,7 @@ The contract is:
 | `GET /api/health` | JSON `{ "ready": true, "model": "installed-model-name" }`; non-ready responses may include a helpful `message`. |
 | `POST /api/chat` with `{ "messages": [...] }` | Ollama-style newline-delimited JSON containing `message.content` deltas and a final `{ "done": true }`. The server owns streaming and model options. |
 
-The server selects the model and applies its own limits; the browser does not supply an arbitrary upstream URL. A stream that closes without its final marker is an error, not a completed answer. Loading this static site on GitHub Pages does not create a local server: the local option requires running the project server and Ollama on the same computer.
+The server selects the model and applies its own limits; the browser does not supply an arbitrary upstream URL. Both runtimes constrain generation with the shared `RESPONSE_SCHEMA`: WebLLM uses `response_format: { type: 'json_object', schema: JSON.stringify(RESPONSE_SCHEMA) }`; Ollama receives the schema in its server-owned `format` field. An answer must contain `reply`, an allowed `region`, a bounded `focus`, and a nullable memory proposal. The client validates the complete object again. A stream that closes without its final marker is an error, not a completed answer. Loading this static site on GitHub Pages does not create a local server: the local option requires running the project server and Ollama on the same computer.
 
 ## Application integration
 
@@ -35,14 +35,14 @@ model.interrupt(); // Stop the active answer, or cancel initialization.
 model.dispose();   // Close this instance and terminate its worker.
 ```
 
-`onToken(delta, accumulatedText)` receives raw generated text. The response ends with a navigation suggestion:
+`onToken(delta, accumulatedText)` receives decoded natural-language dialogue while the model's JSON arrives. The partial-string decoder handles escaped quotes, Unicode and reordered fields without exposing JSON or memory fields. After validating the complete object, the adapter translates it into the application's existing dialogue-plus-navigation format:
 
 ```text
 Let us look at the possibilities you have not yet tested.
 <navigation>{"region":"machine","focus":"Untested possibilities","memory":null}</navigation>
 ```
 
-Regions are `machine`, `maker`, `world` and `unity`. An optional memory is `{ "kind": "goal|insight|tension|project", "text": "..." }`. The app must strip the marker before displaying or speaking, validate its fields, and require explicit approval before saving a memory. Model text is untrusted content, never HTML or executable code. A malformed suggestion must not invent a diagnosis, force a scene transition, or become a saved fact.
+Regions are `machine`, `maker`, `world` and `unity`. An optional memory is `{ "kind": "goal|insight|tension|project", "text": "..." }`. The app must strip the final marker before displaying or speaking and require explicit approval before saving a memory. Model text is untrusted content, never HTML or executable code. Plain text, incomplete JSON or an invalid schema fails the turn; the application never invents navigation to make an invalid generated answer pass. Structural constraints ensure a valid interface contract, not correct meaning, so actual semantic inference tests remain necessary.
 
 The canonical system prompt grounds replies in the three worlds, revisable interpretations, practical agency and the possibility-to-revision loop. The adapter retains recent conversation within a bounded context, not unlimited autobiographical memory. Approved constellation notes may be supplied as bounded application context. The small model can still misunderstand or hallucinate: this implementation does not promise frontier-model reasoning or perfect semantic routing.
 
@@ -59,5 +59,6 @@ Adapter fixtures verify UTF-8 stream splitting, incomplete stream rejection, can
 - [WebLLM worker API](https://webllm.mlc.ai/docs/user/advanced_usage.html)
 - [Pinned model registry](https://github.com/mlc-ai/web-llm/blob/v0.2.85/src/config.ts)
 - [Pinned engine cancellation and stream implementation](https://github.com/mlc-ai/web-llm/blob/v0.2.85/src/engine.ts)
+- [Pinned WebLLM schema-constrained streaming example](https://github.com/mlc-ai/web-llm/blob/v0.2.85/examples/json-schema/src/json_schema.ts)
 - [Qwen model card and license](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct)
 - [Ollama chat protocol](https://docs.ollama.com/api/chat)

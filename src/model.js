@@ -2,6 +2,8 @@
  * Real, keyless conversation. No simulated replies and no automatic provider
  * fallback: the person chooses where their words will be processed.
  */
+import { RESPONSE_SCHEMA, decodeResponse, partialReply } from './response-schema.js';
+
 export const WEBLLM_VERSION = '0.2.85';
 export const WEBLLM_MODULE_URL = `https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@${WEBLLM_VERSION}/+esm`;
 export const BROWSER_MODEL_INFO = Object.freeze({
@@ -12,15 +14,15 @@ export const BROWSER_MODEL_INFO = Object.freeze({
   modelF32: 'Qwen2.5-1.5B-Instruct-q4f32_1-MLC',
 });
 
-export const MODEL_SYSTEM_PROMPT = `You are Dream Unity, a thoughtful conversational guide inside a continuous crystalline space. Help the person explore their own intentions; do not interrogate, flatter, preach, or impose a belief. Respond naturally to what they actually said. Answer questions directly. Usually use 2–4 short sentences, under 100 words, with at most one useful question. Do not repeat an introductory speech each turn.
+export const MODEL_SYSTEM_PROMPT = `You are Dream Unity, a thoughtful guide inside a continuous crystalline space. Answer the person's latest message directly, using the conversation so far. Be specific to what they said. Use 2–3 short sentences, under 70 words, and at most one useful question. No speeches, preaching, flattery or repeated introductions. Do not invent urgency, deadlines, dangers, feelings, or motives. Never pressure someone to act "before it is too late". Treat interpretations as possibilities and accept corrections: the latest correction replaces the earlier assumption.
 
-Dream Machine is possibility: ideas, imagined futures, models, memories, narratives, competing explanations. Dream Maker is agency: attention, meaning, doubt, choice, intention, revision, action. Dream World is encountered reality: other people, bodies, constraints, consequences, and evidence independent of wishes. Unity connects them through possibility → experience → meaning → intention → action → consequence → revision → possibility. All beliefs and interpretations can be questioned and revised. Dream Unity is a useful framework, not proof that reality is a simulation and not the only valid way to live. Never claim to read emotions, diagnose, know hidden motives, measure consciousness, or guarantee transformation. Offer interpretations tentatively, and accept corrections. Distinguish imagination from factual evidence.
+Dream Machine is possibility: ideas, imagined futures, models, memories, narratives, and competing explanations. Dream Maker is agency: attention, meaning, doubt, choice, intention, revision and action. Dream World is encountered reality: people, bodies, constraints, evidence and consequences independent of wishes. Unity connects them through possibility → experience → meaning → intention → action → consequence → revision → possibility. Beliefs are revisable. This framework does not prove reality is a simulation and is not the only valid way to live. Do not diagnose, claim hidden knowledge, measure consciousness or promise transformation.
 
-Language moves the environment. Choose the region most relevant to this turn: machine for exploring possibilities or uncertainty, maker for decisions and practical next steps, world for evidence or consequences, unity for connecting those perspectives. All regions remain part of one space. Do not claim to open external pages, games, or services. If asked to practise, offer a brief real exercise in the conversation. Speak only about available actions. A constellation contains user-approved goals, insights, tensions, and projects; you may suggest a memory only when the user actually expressed it. Never say you saved a memory or infer sensitive personal facts. Suggestions require a separate explicit acceptance.
+Select a region for the LATEST user intention, not the previous turn. Exploring possibilities without having chosen a goal belongs to machine. A known goal, decision or next action belongs to maker. Examining actual events, constraints, evidence or consequences belongs to world. Bringing these perspectives together or a greeting belongs to unity. Honor explicit requests for a region. All four are parts of one space. Do not claim to open external pages or services. If asked to practise, offer a real short exercise in the dialogue.
 
-After your natural-language reply, append exactly one navigation marker, with valid JSON and no markdown fence:
-<navigation>{"region":"machine","focus":"A short meaningful phrase","memory":null}</navigation>
-region must be machine, maker, world, or unity. focus must be under 60 characters. memory is normally null; a useful suggestion may instead be {"kind":"goal","text":"A concise statement in the user's own terms"}, with kind goal, insight, tension, or project. The marker is an interface instruction, not spoken dialogue. Never put other text after it. For a user's instruction to visit a region, honor that region. For a normal greeting, use unity. Do not mention this marker to the person.`;
+Return ONLY one JSON object with exactly these fields:
+{"reply":"Your concise natural-language answer","region":"machine|maker|world|unity","focus":"A short phrase under 60 characters","memory":null}
+The reply is spoken dialogue; never include JSON instructions, navigation tags or markdown fences inside it. memory should normally be null. If the user explicitly expressed a useful goal, insight, tension or project, you may propose {"kind":"goal|insight|tension|project","text":"Their own concise meaning"}. A proposal is not saved until the person separately accepts it. Never claim it has been saved or infer sensitive facts. Choose actual enum values, never a string containing vertical bars.`;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -58,7 +60,8 @@ export function buildModelMessages(messages = []) {
   for (let i = valid.length - 1; i >= 0; i -= 1) {
     const message = valid[i];
     if (message.role !== 'user' && message.role !== 'assistant') continue;
-    const content = boundedText(message.content, Math.min(MAX_TURN_BYTES, budget));
+    const source = message.role === 'assistant' ? message.content.replace(/<navigation>[\s\S]*?<\/navigation>/gi, '').trim() : message.content;
+    const content = boundedText(source, Math.min(MAX_TURN_BYTES, budget));
     if (!content.trim()) continue;
     recent.unshift({ role: message.role, content });
     budget -= encoder.encode(content).length;
@@ -199,7 +202,8 @@ export class ConversationModel {
       this.engine?.interruptGenerate();
     };
     signal?.addEventListener('abort', stop, { once: true });
-    let text = '';
+    let raw = '';
+    let visible = '';
     let stalled;
     const armTimeout = () => {
       clearTimeout(stalled);
@@ -215,23 +219,37 @@ export class ConversationModel {
         operation.fail(cause);
       }, 120000);
     };
+    const emit = next => {
+      if (!next.startsWith(visible)) {
+        operation.callbackError = error('The model changed its response unexpectedly. Please try again.', 'MODEL_INVALID_RESPONSE');
+        stop();
+        return;
+      }
+      const delta = next.slice(visible.length);
+      if (!delta) return;
+      visible = next;
+      try { onToken(delta, visible); } catch (cause) { operation.callbackError = cause; stop(); }
+    };
     const receive = delta => {
       if (this.active !== operation) return;
       armTimeout();
       if (operation.controller.signal.aborted || !delta) return;
-      text += delta;
-      if (text.length > MAX_REPLY_CHARACTERS) {
+      raw += delta;
+      if (raw.length > MAX_REPLY_CHARACTERS) {
         operation.callbackError = error('The model response exceeded the limit. Please try a shorter question.', 'REPLY_TOO_LONG');
         stop();
         return;
       }
-      try { onToken(delta, text); } catch (cause) { operation.callbackError = cause; stop(); }
+      emit(partialReply(raw));
     };
     armTimeout();
     try {
       if (this.provider === 'browser') {
         const engine = this.engine;
-        const stream = await Promise.race([engine.chat.completions.create({ messages: prepared, stream: true, temperature: 0.55, max_tokens: 360, repetition_penalty: 1.08 }), failed]);
+        const stream = await Promise.race([engine.chat.completions.create({
+          messages: prepared, stream: true, temperature: 0.4, max_tokens: 512, repetition_penalty: 1.08,
+          response_format: { type: 'json_object', schema: JSON.stringify(RESPONSE_SCHEMA) },
+        }), failed]);
         // Always drain the stopped generator. Breaking early can leave WebLLM's
         // generation lock held and make the next turn hang indefinitely.
         const drain = async () => {
@@ -246,8 +264,12 @@ export class ConversationModel {
       }
       if (operation.callbackError) throw operation.callbackError;
       checkAbort(operation.controller.signal);
-      if (!text.trim()) throw error('The model returned an empty answer. Please try again.', 'EMPTY_REPLY');
-      return { text };
+      if (!raw.trim()) throw error('The model returned an empty answer. Please try again.', 'EMPTY_REPLY');
+      const response = decodeResponse(raw);
+      emit(response.text);
+      if (operation.callbackError) throw operation.callbackError;
+      checkAbort(operation.controller.signal);
+      return { text: response.text };
     } catch (cause) {
       if (operation.callbackError) throw operation.callbackError;
       if (this.failure) throw this.failure;

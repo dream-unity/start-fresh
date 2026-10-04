@@ -3,6 +3,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { once } from 'node:events';
+import { RESPONSE_SCHEMA } from './src/response-schema.js';
 
 const PROJECT_ROOT = fileURLToPath(new URL('.', import.meta.url));
 const MAX_BODY_BYTES = 40 * 1024;
@@ -179,11 +180,15 @@ export function createAppServer({
         const body = await upstream.json();
         const candidates = Array.isArray(body?.models) ? body.models : [];
         const expected = model.includes(':') ? model : `${model}:latest`;
-        const ready = candidates.some((entry) => entry?.name === model || entry?.model === model
+        const installed = candidates.find((entry) => entry?.name === model || entry?.model === model
           || entry?.name === expected || entry?.model === expected);
+        const remote = Boolean(installed?.remote_model || installed?.remote_host);
+        const ready = Boolean(installed) && !remote;
         json(res, ready ? 200 : 503, {
           ok: ready, provider: 'local', model, ready,
-          ...(!ready && { error: `The local model is not installed. In a terminal, run: ollama pull ${model}. Then check again.` }),
+          ...(!ready && { error: remote
+            ? 'The configured model uses a remote service. Choose a locally installed model in OLLAMA_MODEL, then check again.'
+            : `The local model is not installed. In a terminal, run: ollama pull ${model}. Then check again.` }),
         });
       } catch {
         json(res, 503, {
@@ -207,7 +212,11 @@ export function createAppServer({
         const upstream = await fetchImpl(new URL('/api/chat', upstreamBase), {
           method: 'POST', redirect: 'error', signal: op.signal,
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ model, messages, stream: true }),
+          body: JSON.stringify({
+            model, messages, stream: true,
+            format: RESPONSE_SCHEMA,
+            options: { num_predict: 512, temperature: 0.4, num_ctx: 4096 },
+          }),
         });
         if (!upstream.ok || !upstream.body) {
           await upstream.body?.cancel();

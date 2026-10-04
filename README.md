@@ -2,7 +2,7 @@
 
 A new implementation of the [original Crystal Nexus brief](https://chatgpt.com/share/6ac05873-6728-83ec-a932-66616dcb794a). This repository is independent of the existing Dream Unity websites.
 
-One continuous crystalline space connects **Dream Machine** (possibility), **Dream Maker** (agency) and **Dream World** (encounter and consequences), through **Unity**. A real conversational model answers your words and proposes movement through the space. The transcript stays at the edge. Personal threads enter your constellation only when you keep them.
+One continuous crystalline space connects **Dream Machine** (possibility), **Dream Maker** (agency) and **Dream World** (encounter and consequences), through **Unity**. A real conversational model answers your words and proposes movement through the space using constrained structured output. The transcript stays at the edge. Personal threads enter your constellation only when you keep them.
 
 ## Run it
 
@@ -28,7 +28,7 @@ ollama pull qwen2.5:1.5b
 npm start
 ```
 
-If the Ollama application is not already serving, run `ollama serve` in another terminal. Choose **Connect local model** in the experience. To use another installed model, set `OLLAMA_MODEL` when starting the server. The default is deliberately small enough for ordinary computers; larger compatible instruction models can give stronger answers. No API key, API credits, Vercel account or external database is required.
+If the Ollama application is not already serving, run `ollama serve` in another terminal. Choose **Connect local model** in the experience. To use another locally installed instruction model, set `OLLAMA_MODEL` when starting the server. The default is deliberately small enough for ordinary computers; larger compatible instruction models can give stronger answers. No API key, API credits, Vercel account or external database is required.
 
 ## Enter the experience
 

@@ -8,7 +8,8 @@ const $=id=>document.getElementById(id);
 const model=new ConversationModel();
 let scene, voice, memories;
 let entered=false, voiceEnabled=false, epoch=0, activeTurn=null, history=[], proposal=null, editing=null;
-let region='unity', lastInterim='', motion=!matchMedia('(prefers-reduced-motion: reduce)').matches;
+const motionPreference=matchMedia('(prefers-reduced-motion: reduce)');
+let region='unity', lastInterim='', motion=!motionPreference.matches;
 let loading=false, modelReady=false, lastFocus=null, openingAttempted=false, importEpoch=0;
 const OPENING='Tell me why you are here.';
 
@@ -74,7 +75,7 @@ voice=new VoiceSession({
   onError(error) { voiceEnabled=false; status(error.message,'error'); updateControls(); },
   onUnsupported(error) { voiceEnabled=false; status(error.message,'error'); updateControls(); },
 });
-memories=createConstellation({onChange:snapshot=>renderMemory(snapshot)});
+memories=createConstellation({onChange:snapshot=>{++importEpoch;renderMemory(snapshot);}});
 renderMemory(memories.getSnapshot()); updateControls();
 
 async function loadModel(provider) {
@@ -289,6 +290,7 @@ $('new-conversation').addEventListener('click',()=>{
 $('motion-toggle').addEventListener('click',()=>{motion=!motion;scene.setMotion(motion);renderMotion();});
 function renderMotion(){$('motion-toggle').textContent=motion?'Pause motion':'Resume motion';$('motion-toggle').setAttribute('aria-pressed',String(!motion));}
 renderMotion();
+motionPreference.addEventListener?.('change',event=>{motion=!event.matches;scene.setMotion(motion);renderMotion();});
 for(const dialog of document.querySelectorAll('dialog')) {
   dialog.querySelector('[data-close]')?.addEventListener('click',()=>closeDialog(dialog));
   dialog.addEventListener('close',()=>{if(dialog.id==='setup'&&loading)model.interrupt();});

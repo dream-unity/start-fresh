@@ -85,10 +85,12 @@ async function speechFixture(context, denied = false) {
 }
 
 function ndjson(text, region = 'unity', memory = null) {
-  const reply = `${text}\n<navigation>${JSON.stringify({ region, focus: `A ${region} perspective`, memory })}</navigation>`;
-  // The stream boundary deliberately cuts through the private navigation marker.
-  const split = reply.indexOf('<navigation>') + 4;
-  return [reply.slice(0, split), reply.slice(split)].map(content => JSON.stringify({ message: { role: 'assistant', content }, done: false })).join('\n') + '\n' + JSON.stringify({ done: true }) + '\n';
+  const reply = JSON.stringify({ reply: text, region, focus: `A ${region} perspective`, memory });
+  // This is the same constrained JSON envelope requested from the actual model.
+  // Seven-character pieces also exercise partial property names and escaped
+  // strings; only decoded reply text may reach the visible conversation.
+  const pieces = reply.match(/[\s\S]{1,7}/g);
+  return pieces.map(content => JSON.stringify({ message: { role: 'assistant', content }, done: false })).join('\n') + '\n' + JSON.stringify({ done: true }) + '\n';
 }
 
 async function mockModel(page) {
@@ -114,7 +116,7 @@ async function mockModel(page) {
     } else if (/possibilit|ideas|imagine/i.test(input)) {
       response = ndjson('We can give your possibilities some space. What is one direction you would like to explore?', 'machine', { kind: 'goal', text: 'Explore possibilities for a creative project.' });
     } else if (/action|choose|step/i.test(input)) {
-      response = ndjson('You have a direction. Choose one small action you can take today.', 'maker');
+      response = ndjson('You have a direction. Choose one small action you can call "a beginning" today.', 'maker');
     } else if (/evidence|consequence|actually happened/i.test(input)) {
       response = ndjson('Let us compare your expectation with the evidence of what actually happened.', 'world');
     } else {
@@ -146,6 +148,7 @@ async function ready(page) {
   await page.goto(origin, { waitUntil: 'networkidle' });
   await page.locator('#enter').waitFor({ state: 'visible' });
   await page.waitForFunction(() => document.querySelector('#nexus')?.dataset.renderer === 'webgl');
+  assert.equal(await page.locator('#nexus').getAttribute('data-region'), 'unity');
 }
 
 async function connect(page) {
@@ -164,6 +167,7 @@ async function typeTurn(page, text, expectedRegion) {
   await page.locator('#send').click();
   if (expectedRegion) await page.waitForFunction(region =>
     document.querySelector('#region-title')?.textContent.includes(region)
+    && document.querySelector('#nexus')?.dataset.region === region.replace('Dream ', '').toLowerCase()
     && document.querySelector('#status')?.textContent.includes('Your turn.'), expectedRegion);
 }
 
@@ -192,6 +196,7 @@ async function main() {
   await page.waitForFunction(() => window.__speechFixture.active?.running);
   await page.evaluate(() => window.__speechFixture.emit('I want to explore possibilities for a creative project.'));
   await page.waitForFunction(() => document.querySelector('#region-title')?.textContent.includes('Dream Machine'));
+  assert.equal(await page.locator('#nexus').getAttribute('data-region'), 'machine');
   await page.locator('#proposal').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#memory-count').textContent(), '0', 'A proposed memory must not already be saved.');
   await page.locator('#proposal-keep').click();

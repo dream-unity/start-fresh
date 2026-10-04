@@ -98,7 +98,7 @@ try {
     if (sample.relevant) assert.match(text, sample.relevant, 'The answer must address this specific turn.');
     sample.validate?.(text);
     record.passed = true;
-    history.push({ role: 'assistant', content: raw });
+    history.push({ role: 'assistant', content: text });
     console.log(JSON.stringify({ case: sample.name, region: intent.region, text, durationMs: record.durationMs }));
   }
   assert.equal(new Set(results.slice(0, 3).map(result => result.intent.region)).size, 3);

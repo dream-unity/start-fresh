@@ -6,6 +6,7 @@ import { mkdtemp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createAppServer } from '../server.mjs';
+import { RESPONSE_SCHEMA } from '../src/response-schema.js';
 
 const validBody = { messages: [{ role: 'system', content: 'You are a guide.' }, { role: 'user', content: 'Hello.' }] };
 
@@ -114,6 +115,7 @@ test('rejects malformed schemas and client-controlled model/options without upst
   for (const body of [
     null, [], {}, { messages: [] }, { messages: new Array(33).fill({ role: 'user', content: 'Hi' }) },
     { ...validBody, model: 'unapproved' }, { ...validBody, options: { num_ctx: 9999999 } },
+    { ...validBody, format: { type: 'string' } },
     { messages: [{ role: 'tool', content: 'Hi' }] }, { messages: [{ role: 'user', content: '' }] },
     { messages: [{ role: 'user', content: ' '.repeat(10) }] }, { messages: [{ role: 'user', content: 'a'.repeat(6001) }] },
     { messages: [{ role: 'user', content: 1 }] }, { messages: [{ role: 'user', content: 'Hi', images: ['data'] }] },
@@ -143,7 +145,11 @@ test('streams NDJSON from the server-selected local model with sanitized message
   assert.equal(response.text, output);
   assert.equal(sent.url, 'http://127.0.0.1:11434/api/chat');
   assert.equal(sent.options.redirect, 'error');
-  assert.deepEqual(sent.body, { model: 'qwen2.5:1.5b', messages: validBody.messages, stream: true });
+  assert.deepEqual(sent.body, {
+    model: 'qwen2.5:1.5b', messages: validBody.messages, stream: true,
+    format: RESPONSE_SCHEMA,
+    options: { num_predict: 512, temperature: 0.4, num_ctx: 4096 },
+  });
 });
 
 test('health distinguishes a present model, a missing model, and an unreachable service', async (t) => {
@@ -160,6 +166,12 @@ test('health distinguishes a present model, a missing model, and an unreachable 
   const missing = await request(app, '/api/health');
   assert.equal(missing.status, 503);
   assert.match(JSON.parse(missing.text).error, /ollama pull qwen2\.5:1\.5b/);
+  response = () => Response.json({ models: [{ name: 'qwen2.5:1.5b', remote_model: 'cloud-model', remote_host: 'https://cloud.example' }] });
+  const remote = await request(app, '/api/health');
+  assert.equal(remote.status, 503);
+  assert.equal(JSON.parse(remote.text).ready, false);
+  assert.match(JSON.parse(remote.text).error, /Choose a locally installed model/);
+  assert.doesNotMatch(remote.text, /cloud\.example/);
   response = () => { throw new Error('Private upstream detail'); };
   const unavailable = await request(app, '/api/health');
   assert.equal(unavailable.status, 503);
