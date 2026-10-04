@@ -1,0 +1,21 @@
+{
+  "kind": "real-local-model-inference",
+  "startedAt": "2026-10-04T04:19:11.878Z",
+  "model": "qwen2.5:1.5b",
+  "syntheticInputsOnly": true,
+  "cases": [
+    {
+      "name": "possibilities move toward Dream Machine",
+      "input": "I do not know what I want to do with my life. I am torn between writing a novel and studying architecture, and want to explore those possibilities before choosing.",
+      "output": "You're at a crossroads where your future hangs in the balance, with novel writing and architectural studies both vying for your attention. Each path offers unique opportunities and challenges, yet it's unclear which to pursue. You're left with the daunting task of deciding which to devote your time to before it's too late. Consider the pros and cons of each, weighing the skills and interests involved. It might be helpful to envision how each path would unfold, what kind of life each offers, and how well you would enjoy each discipline. You might also think about how you might go about achieving the goals of each, and what kind of life you want to lead.",
+      "text": "You're at a crossroads where your future hangs in the balance, with novel writing and architectural studies both vying for your attention. Each path offers unique opportunities and challenges, yet it's unclear which to pursue. You're left with the daunting task of deciding which to devote your time to before it's too late. Consider the pros and cons of each, weighing the skills and interests involved. It might be helpful to envision how each path would unfold, what kind of life each offers, and how well you would enjoy each discipline. You might also think about how you might go about achieving the goals of each, and what kind of life you want to lead.",
+      "intent": null,
+      "streamedChunks": 133,
+      "durationMs": 14978,
+      "passed": false
+    }
+  ],
+  "passed": false,
+  "error": "The actual model must produce a parseable navigation marker.",
+  "durationMs": 15062
+}
