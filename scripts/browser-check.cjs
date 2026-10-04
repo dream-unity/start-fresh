@@ -113,7 +113,7 @@ async function mockModel(page, { available = true } = {}) {
     if (op === 'status') {
       assert.equal(request.method(), 'GET');
       counts.status++;
-      return json(route, { ready: available, model: 'openai/gpt-fixture', ...(!available && { error: 'The guide is temporarily unavailable.' }) });
+      return json(route, { ready: available, transcription: available, model: 'openai/gpt-fixture', ...(!available && { error: 'The guide is temporarily unavailable.' }) });
     }
     assert.equal(request.method(), 'POST');
     if (op === 'transcribe') {
@@ -172,7 +172,10 @@ async function ready(page, { guideReady = true } = {}) {
   assert.equal(await page.locator('#nexus').getAttribute('data-region'), 'unity');
   await page.waitForFunction(available => {
     const text = document.querySelector('#runtime-status')?.textContent || '';
-    return available ? text.includes('connected') : text.includes('unavailable');
+    // Preflight reports configuration, not a proven successful GPT response.
+    const settled = document.querySelector('#retry-connection')?.disabled === false
+      && document.querySelector('#send')?.disabled === false;
+    return settled && (available ? text.includes('connection is configured') : text.includes('unavailable'));
   }, guideReady);
   assert.equal(await page.locator('#connect-chatgpt,#chatgpt-model,#use-chatgpt,#use-local,#use-browser,#alternative-models,#plan-indicator').count(), 0,
     'Visitors must not be asked for an account, subscription, installation, or model selection.');
