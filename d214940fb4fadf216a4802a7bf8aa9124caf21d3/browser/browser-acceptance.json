@@ -1,0 +1,24 @@
+{
+  "suite": "Deterministic full-app acceptance",
+  "model": "MOCKED anonymous public status and structured GPT replies",
+  "speech": "MOCKED MediaRecorder, microphone streams, transcription and synthesis",
+  "authorization": "No visitor authentication or account selection",
+  "renderer": "Real Chromium WebGL via SwiftShader",
+  "limitations": [
+    "Does not validate physical microphone capture or real audio encoding.",
+    "Does not validate production availability, real transcription, or an actual GPT response."
+  ],
+  "checks": [
+    "Real WebGL scene; no microphone, inference, or persistence before consent",
+    "Anonymous typed entry → structured guide reply → scene navigation; memory requires review and explicit acceptance",
+    "Machine → Maker → World in one scene; control metadata excluded from speech and text",
+    "Interrupted response cannot speak, navigate, or enter the transcript after cancellation",
+    "Device persistence is opt-in; explicit reload restore and deletion work through the real UI",
+    "One initial preflight; unavailable guide recovers only after explicit retry without opening audio",
+    "Mock microphone permission denial remains stable; typed conversation still works",
+    "A browser without recording support retains a working typed conversation",
+    "Mobile MediaRecorder without native recognition → one transcription → reply → next turn; Pause releases tracks and stays paused"
+  ],
+  "modelRequests": 5,
+  "passed": true
+}
